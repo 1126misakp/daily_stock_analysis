@@ -512,6 +512,7 @@ class StockAnalysisPipeline:
                 trend_result,
                 stock_name,  # 传入股票名称
                 fundamental_context,
+                market_phase_context=market_phase_context_dict,
             )
             enhanced_context["market_phase_context"] = market_phase_context_dict
             
@@ -657,7 +658,8 @@ class StockAnalysisPipeline:
         chip_data: Optional[ChipDistribution],
         trend_result: Optional[TrendAnalysisResult],
         stock_name: str = "",
-        fundamental_context: Optional[Dict[str, Any]] = None
+        fundamental_context: Optional[Dict[str, Any]] = None,
+        market_phase_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         增强分析上下文
@@ -670,6 +672,7 @@ class StockAnalysisPipeline:
             chip_data: 筹码分布数据
             trend_result: 趋势分析结果
             stock_name: 股票名称
+            market_phase_context: 已构建的市场阶段上下文，用于标记盘中 partial bar
             
         Returns:
             增强后的上下文
@@ -690,6 +693,9 @@ class StockAnalysisPipeline:
         if realtime_quote:
             # 使用 getattr 安全获取字段，缺失字段返回 None 或默认值
             volume_ratio = getattr(realtime_quote, 'volume_ratio', None)
+            quote_source = getattr(realtime_quote, 'source', None)
+            quote_source_name = getattr(quote_source, 'value', quote_source)
+            quote_source_name = str(quote_source_name) if quote_source_name is not None else None
             enhanced['realtime'] = {
                 'name': getattr(realtime_quote, 'name', ''),
                 'price': getattr(realtime_quote, 'price', None),
@@ -702,7 +708,12 @@ class StockAnalysisPipeline:
                 'total_mv': getattr(realtime_quote, 'total_mv', None),
                 'circ_mv': getattr(realtime_quote, 'circ_mv', None),
                 'change_60d': getattr(realtime_quote, 'change_60d', None),
-                'source': getattr(realtime_quote, 'source', None),
+                'source': quote_source_name,
+                'fetched_at': getattr(realtime_quote, 'fetched_at', None),
+                'provider_timestamp': getattr(realtime_quote, 'provider_timestamp', None),
+                'is_stale': getattr(realtime_quote, 'is_stale', None),
+                'stale_seconds': getattr(realtime_quote, 'stale_seconds', None),
+                'fallback_from': getattr(realtime_quote, 'fallback_from', None),
             }
             # 移除 None 值以减少上下文大小
             enhanced['realtime'] = {k: v for k, v in enhanced['realtime'].items() if v is not None}
@@ -757,6 +768,9 @@ class StockAnalysisPipeline:
                 vol = getattr(realtime_quote, 'volume', None)
                 amt = getattr(realtime_quote, 'amount', None)
                 pct = getattr(realtime_quote, 'change_pct', None)
+                fetched_at = getattr(realtime_quote, 'fetched_at', None)
+                provider_timestamp = getattr(realtime_quote, 'provider_timestamp', None)
+                fallback_from = getattr(realtime_quote, 'fallback_from', None)
                 realtime_today = {
                     'close': price,
                     'open': open_p,
@@ -768,18 +782,38 @@ class StockAnalysisPipeline:
                     'date': market_today,
                     'data_source': f"realtime:{source_name}",
                     'realtime_source': source_name,
+                    'is_estimated': True,
                 }
+                estimated_fields = [
+                    'close', 'open', 'high', 'low', 'ma5', 'ma10', 'ma20',
+                ]
                 if vol is not None:
                     realtime_today['volume'] = vol
+                    estimated_fields.append('volume')
                 if amt is not None:
                     realtime_today['amount'] = amt
+                    estimated_fields.append('amount')
                 if pct is not None:
                     realtime_today['pct_chg'] = pct
+                    estimated_fields.append('pct_chg')
+                realtime_today['estimated_fields'] = estimated_fields
+                if isinstance(market_phase_context, dict) and "is_partial_bar" in market_phase_context:
+                    realtime_today['is_partial_bar'] = market_phase_context.get("is_partial_bar")
+                if fetched_at is not None:
+                    realtime_today['fetched_at'] = fetched_at
+                if provider_timestamp is not None:
+                    realtime_today['provider_timestamp'] = provider_timestamp
+                if fallback_from is not None:
+                    realtime_today['fallback_from'] = fallback_from
                 realtime_owned_fields = {
                     'open', 'high', 'low', 'close',
                     'volume', 'amount', 'pct_chg', 'pctChg',
                     'date', 'data_source', 'dataSource', 'source',
                     'realtime_source', 'realtimeSource',
+                    'is_partial_bar', 'isPartialBar', 'is_estimated',
+                    'isEstimated', 'estimated_fields', 'estimatedFields',
+                    'fetched_at', 'fetchedAt', 'provider_timestamp',
+                    'providerTimestamp', 'fallback_from', 'fallbackFrom',
                 }
                 for k, v in orig_today.items():
                     if k not in realtime_today and k not in realtime_owned_fields and v is not None:

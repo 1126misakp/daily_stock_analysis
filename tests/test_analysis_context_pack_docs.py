@@ -6,6 +6,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOC_PATH = PROJECT_ROOT / "docs" / "analysis-context-pack.md"
+FULL_GUIDE_PATH = PROJECT_ROOT / "docs" / "full-guide.md"
+FULL_GUIDE_EN_PATH = PROJECT_ROOT / "docs" / "full-guide_EN.md"
 
 
 def _read_doc() -> str:
@@ -224,6 +226,32 @@ def test_analysis_context_pack_doc_defines_p2_builder_boundaries() -> None:
         "不写入 history/task/report metadata",
     ):
         assert token in section
+
+
+def test_analysis_context_pack_docs_record_issue_1386_p3_quality_boundaries() -> None:
+    section = _section(_read_doc(), "P2 Builder 契约")
+
+    for token in (
+        "`fetched_at`",
+        "`provider_timestamp`",
+        "`is_stale`",
+        "`stale_seconds`",
+        "`fallback_from`",
+        "`STALE > FALLBACK > AVAILABLE`",
+        "builder 只映射上游 artifact，不做质量评分",
+        "`is_partial_bar`、`is_estimated`、`estimated_fields`",
+        "`daily_bars` 不承载 partial/estimated",
+    ):
+        assert token in section
+
+    full_guide = FULL_GUIDE_PATH.read_text(encoding="utf-8")
+    full_guide_en = FULL_GUIDE_EN_PATH.read_text(encoding="utf-8")
+    assert "盘中数据包与实时质量控制（Issue #1386 P3）" in full_guide
+    assert "source` 保留实际成功的数据源 token" in full_guide
+    assert "`AnalysisContextBuilder` 只映射这些上游 artifact" in full_guide
+    assert "daily_bars` block 仍表示 storage 中完整日线窗口" in full_guide
+    assert "Intraday Data Packet and Realtime Quality Control (Issue #1386 P3)" in full_guide_en
+    assert "source` keeps the actual successful provider token" in full_guide_en
 
 
 def test_analysis_context_pack_doc_defines_p3_runtime_consumption_boundaries() -> None:
