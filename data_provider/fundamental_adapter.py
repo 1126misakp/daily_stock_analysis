@@ -262,7 +262,212 @@ def _extract_latest_row(df: pd.DataFrame, stock_code: str) -> Optional[pd.Series
 
 
 class AkshareFundamentalAdapter:
-    """AkShare adapter for fundamentals, capital flow and dragon-tiger signals."""
+    """AkShare adapter for fundamentals, capital flow and dragon-tiger signals.
+
+    P1：注入 ``tushare_provider``（返回 manager 链里已实例化的 TushareFetcher
+    或 None）后，资金流/龙虎榜/财务区块优先取 Tushare，失败回退原 akshare 候选。
+    未注入（provider=None / 返回 None）时行为与纯 akshare 适配器一致。
+    """
+
+    def __init__(self, tushare_provider: Optional[Any] = None) -> None:
+        # tushare_provider: Callable[[], Optional[TushareFetcher]]，延迟解析以复用
+        # manager 链里已实例化的 Tushare（共享限频，见决策②）。
+        self._tushare_provider = tushare_provider
+        # top_list 按交易日缓存，避免多只自选股重复拉同一天全市场龙虎榜
+        self._top_list_cache: Dict[str, Optional[pd.DataFrame]] = {}
+
+    def _tushare(self) -> Optional[Any]:
+        """解析可用的 TushareFetcher 实例；不可用返回 None。"""
+        provider = getattr(self, "_tushare_provider", None)
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception as exc:
+            logger.debug("[fundamental] 解析 Tushare 实例失败: %s", exc)
+            return None
+
+    def _tushare_stock_flow(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """个股资金流：Tushare moneyflow → {main_net_inflow, inflow_5d, inflow_10d}。
+
+        Tushare ``net_mf_amount`` 单位为万元，统一 ×1e4 转为元，与 akshare
+        ``主力净流入-净额`` 口径对齐。无实例 / 无数据返回 None（回退 akshare）。
+        """
+        fetcher = self._tushare()
+        if fetcher is None or not hasattr(fetcher, "get_moneyflow"):
+            return None
+        now = datetime.now()
+        df = fetcher.get_moneyflow(
+            stock_code,
+            start_date=(now - timedelta(days=30)).strftime("%Y%m%d"),
+            end_date=now.strftime("%Y%m%d"),
+        )
+        if (
+            df is None
+            or getattr(df, "empty", True)
+            or "net_mf_amount" not in df.columns
+            or "trade_date" not in df.columns
+        ):
+            return None
+        work = df.sort_values("trade_date", ascending=False)
+        net = pd.to_numeric(work["net_mf_amount"], errors="coerce").dropna()
+        if net.empty:
+            return None
+        to_yuan = 1e4
+        return {
+            "main_net_inflow": float(net.iloc[0]) * to_yuan,
+            "inflow_5d": float(net.head(5).sum()) * to_yuan,
+            "inflow_10d": float(net.head(10).sum()) * to_yuan,
+        }
+
+    def _cached_top_list(self, fetcher: Any, trade_date: str) -> Optional[pd.DataFrame]:
+        """按交易日缓存全市场龙虎榜，避免多只自选股重复拉同一天。"""
+        if trade_date in self._top_list_cache:
+            return self._top_list_cache[trade_date]
+        df = fetcher.get_top_list(trade_date)
+        self._top_list_cache[trade_date] = df
+        return df
+
+    def _tushare_dragon_tiger(
+        self, stock_code: str, lookback_days: int
+    ) -> Optional[Dict[str, Any]]:
+        """龙虎榜：在 lookback 交易日窗口内统计个股上榜情况（Tushare top_list）。
+
+        复用 TushareFetcher 的交易日历（_get_trade_dates）确定窗口内交易日，
+        逐日（缓存）拉全市场龙虎榜按 ts_code 过滤。窗口内一条都没取到 → 返回
+        None 回退 akshare。返回 {is_on_list, recent_count, latest_date}。
+        """
+        fetcher = self._tushare()
+        if (
+            fetcher is None
+            or not hasattr(fetcher, "get_top_list")
+            or not hasattr(fetcher, "_get_trade_dates")
+        ):
+            return None
+        try:
+            trade_dates = fetcher._get_trade_dates()
+        except Exception as exc:
+            logger.debug("[fundamental] Tushare 交易日历获取失败: %s", exc)
+            return None
+        if not trade_dates:
+            return None
+
+        cutoff = (datetime.now() - timedelta(days=max(1, lookback_days))).strftime("%Y%m%d")
+        target = _normalize_code(stock_code)
+        hit_dates: List[str] = []
+        checked_any = False
+        for td in trade_dates:
+            if str(td) < cutoff:
+                continue
+            df = self._cached_top_list(fetcher, td)
+            if df is None or getattr(df, "empty", True) or "ts_code" not in df.columns:
+                continue
+            checked_any = True
+            codes = df["ts_code"].astype(str).map(_normalize_code)
+            if bool((codes == target).any()):
+                hit_dates.append(str(td))
+
+        if not checked_any:
+            return None
+
+        hit_dates.sort(reverse=True)
+        return {
+            "is_on_list": bool(hit_dates),
+            "recent_count": len(hit_dates),
+            "latest_date": _normalize_report_date(hit_dates[0]) if hit_dates else None,
+        }
+
+    @staticmethod
+    def _ts_num(value: Any) -> Optional[float]:
+        """Tushare 数值归一：None / NaN → None，否则转 float。"""
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return _safe_float(value)
+
+    @staticmethod
+    def _latest_report_row(
+        df: Optional[pd.DataFrame], prefer_consolidated: bool = False
+    ) -> Optional[pd.Series]:
+        """取最新报告期一行：优先合并报表(report_type=='1')，按 end_date 降序。"""
+        if df is None or getattr(df, "empty", True) or "end_date" not in df.columns:
+            return None
+        work = df
+        if prefer_consolidated and "report_type" in work.columns:
+            consolidated = work[work["report_type"].astype(str) == "1"]
+            if not consolidated.empty:
+                work = consolidated
+        work = work.sort_values("end_date", ascending=False)
+        return work.iloc[0]
+
+    def _tushare_growth(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """成长指标：Tushare fina_indicator 最新期 → growth 结构。"""
+        fetcher = self._tushare()
+        if fetcher is None or not hasattr(fetcher, "get_fina_indicator"):
+            return None
+        row = self._latest_report_row(fetcher.get_fina_indicator(stock_code))
+        if row is None:
+            return None
+        revenue_yoy = self._ts_num(row.get("or_yoy"))
+        if revenue_yoy is None:
+            revenue_yoy = self._ts_num(row.get("tr_yoy"))
+        net_profit_yoy = self._ts_num(row.get("netprofit_yoy"))
+        if net_profit_yoy is None:
+            net_profit_yoy = self._ts_num(row.get("dt_netprofit_yoy"))
+        payload = {
+            "revenue_yoy": revenue_yoy,
+            "net_profit_yoy": net_profit_yoy,
+            "roe": self._ts_num(row.get("roe")),
+            "gross_margin": self._ts_num(row.get("grossprofit_margin")),
+        }
+        if all(v is None for v in payload.values()):
+            return None
+        return payload
+
+    def _tushare_financial_report(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """财务报表：income(revenue/n_income_attr_p) + cashflow(n_cashflow_act)
+        + fina_indicator(roe)，取各自最新合并报表期。"""
+        fetcher = self._tushare()
+        if fetcher is None or not hasattr(fetcher, "get_income_statement"):
+            return None
+        inc = self._latest_report_row(fetcher.get_income_statement(stock_code), prefer_consolidated=True)
+        cf = self._latest_report_row(fetcher.get_cashflow_statement(stock_code), prefer_consolidated=True)
+        fina = self._latest_report_row(fetcher.get_fina_indicator(stock_code))
+
+        revenue = self._ts_num(inc.get("revenue")) if inc is not None else None
+        if revenue is None and inc is not None:
+            revenue = self._ts_num(inc.get("total_revenue"))
+        payload = {
+            "report_date": _normalize_report_date(inc.get("end_date")) if inc is not None else None,
+            "revenue": revenue,
+            "net_profit_parent": self._ts_num(inc.get("n_income_attr_p")) if inc is not None else None,
+            "operating_cash_flow": self._ts_num(cf.get("n_cashflow_act")) if cf is not None else None,
+            "roe": self._ts_num(fina.get("roe")) if fina is not None else None,
+        }
+        if all(v is None for v in payload.values()):
+            return None
+        return payload
+
+    def _tushare_top10_change(self, stock_code: str) -> Optional[float]:
+        """十大股东持股变动：取最新报告期 top10_holders 的 hold_change 求和。"""
+        fetcher = self._tushare()
+        if fetcher is None or not hasattr(fetcher, "get_top10_holders"):
+            return None
+        df = fetcher.get_top10_holders(stock_code)
+        if df is None or getattr(df, "empty", True):
+            return None
+        if "end_date" not in df.columns or "hold_change" not in df.columns:
+            return None
+        latest_end = df["end_date"].astype(str).max()
+        latest = df[df["end_date"].astype(str) == latest_end]
+        changes = pd.to_numeric(latest["hold_change"], errors="coerce").dropna()
+        if changes.empty:
+            return None
+        return float(changes.sum())
 
     def _call_df_candidates(
         self,
@@ -302,13 +507,27 @@ class AkshareFundamentalAdapter:
             "errors": [],
         }
 
-        # Financial indicators
-        fin_df, fin_source, fin_errors = self._call_df_candidates([
-            ("stock_financial_abstract", {"symbol": stock_code}),
-            ("stock_financial_analysis_indicator", {"symbol": stock_code}),
-            ("stock_financial_analysis_indicator", {}),
-        ])
-        result["errors"].extend(fin_errors)
+        # P1-2：成长 + 财务报表优先取 Tushare（fina_indicator/income/cashflow），
+        # 命中则跳过下方 akshare 财务指标块；失败则回退 akshare。
+        tushare_growth = self._tushare_growth(stock_code)
+        tushare_report = self._tushare_financial_report(stock_code)
+        tushare_financials_hit = tushare_growth is not None or tushare_report is not None
+        if tushare_growth is not None:
+            result["growth"] = tushare_growth
+            result["source_chain"].append("growth:tushare:fina_indicator")
+        if tushare_report is not None:
+            result["earnings"]["financial_report"] = tushare_report
+            result["source_chain"].append("financial_report:tushare:income")
+
+        # Financial indicators (akshare 回退，仅当 Tushare 未命中)
+        fin_df = None
+        if not tushare_financials_hit:
+            fin_df, fin_source, fin_errors = self._call_df_candidates([
+                ("stock_financial_abstract", {"symbol": stock_code}),
+                ("stock_financial_analysis_indicator", {"symbol": stock_code}),
+                ("stock_financial_analysis_indicator", {}),
+            ])
+            result["errors"].extend(fin_errors)
         if fin_df is not None:
             row = _extract_latest_row(fin_df, stock_code)
             if row is not None:
@@ -395,19 +614,25 @@ class AkshareFundamentalAdapter:
                 result["institution"]["institution_holding_change"] = inst_change
                 result["source_chain"].append(f"institution:{inst_source}")
 
-        top10_df, top10_source, top10_errors = self._call_df_candidates([
-            ("stock_gdfx_top_10_em", {"symbol": stock_code}),
-            ("stock_gdfx_top_10_em", {}),
-            ("stock_zh_a_gdhs_detail_em", {"symbol": stock_code}),
-            ("stock_zh_a_gdhs_detail_em", {}),
-        ])
-        result["errors"].extend(top10_errors)
-        if top10_df is not None:
-            row = _extract_latest_row(top10_df, stock_code)
-            if row is not None:
-                holder_change = _safe_float(_pick_by_keywords(row, ["增减", "变化", "持股变化", "变动"]))
-                result["institution"]["top10_holder_change"] = holder_change
-                result["source_chain"].append(f"top10:{top10_source}")
+        # P1-2：十大股东持股变动优先取 Tushare top10_holders，失败回退 akshare。
+        tushare_top10 = self._tushare_top10_change(stock_code)
+        if tushare_top10 is not None:
+            result["institution"]["top10_holder_change"] = tushare_top10
+            result["source_chain"].append("top10:tushare:top10_holders")
+        else:
+            top10_df, top10_source, top10_errors = self._call_df_candidates([
+                ("stock_gdfx_top_10_em", {"symbol": stock_code}),
+                ("stock_gdfx_top_10_em", {}),
+                ("stock_zh_a_gdhs_detail_em", {"symbol": stock_code}),
+                ("stock_zh_a_gdhs_detail_em", {}),
+            ])
+            result["errors"].extend(top10_errors)
+            if top10_df is not None:
+                row = _extract_latest_row(top10_df, stock_code)
+                if row is not None:
+                    holder_change = _safe_float(_pick_by_keywords(row, ["增减", "变化", "持股变化", "变动"]))
+                    result["institution"]["top10_holder_change"] = holder_change
+                    result["source_chain"].append(f"top10:{top10_source}")
 
         has_content = bool(result["growth"] or result["earnings"] or result["institution"])
         result["status"] = "partial" if has_content else "not_supported"
@@ -425,26 +650,32 @@ class AkshareFundamentalAdapter:
             "errors": [],
         }
 
-        stock_df, stock_source, stock_errors = self._call_df_candidates([
-            ("stock_individual_fund_flow", {"stock": stock_code}),
-            ("stock_individual_fund_flow", {"symbol": stock_code}),
-            ("stock_individual_fund_flow", {}),
-            ("stock_main_fund_flow", {"symbol": stock_code}),
-            ("stock_main_fund_flow", {}),
-        ])
-        result["errors"].extend(stock_errors)
-        if stock_df is not None:
-            row = _extract_latest_row(stock_df, stock_code)
-            if row is not None:
-                net_inflow = _safe_float(_pick_by_keywords(row, ["主力净流入", "净流入", "净额"]))
-                inflow_5d = _safe_float(_pick_by_keywords(row, ["5日", "五日"]))
-                inflow_10d = _safe_float(_pick_by_keywords(row, ["10日", "十日"]))
-                result["stock_flow"] = {
-                    "main_net_inflow": net_inflow,
-                    "inflow_5d": inflow_5d,
-                    "inflow_10d": inflow_10d,
-                }
-                result["source_chain"].append(f"capital_stock:{stock_source}")
+        # P1-3：个股资金流优先取 Tushare moneyflow，失败回退 akshare 候选。
+        tushare_flow = self._tushare_stock_flow(stock_code)
+        if tushare_flow is not None:
+            result["stock_flow"] = tushare_flow
+            result["source_chain"].append("capital_stock:tushare:moneyflow")
+        else:
+            stock_df, stock_source, stock_errors = self._call_df_candidates([
+                ("stock_individual_fund_flow", {"stock": stock_code}),
+                ("stock_individual_fund_flow", {"symbol": stock_code}),
+                ("stock_individual_fund_flow", {}),
+                ("stock_main_fund_flow", {"symbol": stock_code}),
+                ("stock_main_fund_flow", {}),
+            ])
+            result["errors"].extend(stock_errors)
+            if stock_df is not None:
+                row = _extract_latest_row(stock_df, stock_code)
+                if row is not None:
+                    net_inflow = _safe_float(_pick_by_keywords(row, ["主力净流入", "净流入", "净额"]))
+                    inflow_5d = _safe_float(_pick_by_keywords(row, ["5日", "五日"]))
+                    inflow_10d = _safe_float(_pick_by_keywords(row, ["10日", "十日"]))
+                    result["stock_flow"] = {
+                        "main_net_inflow": net_inflow,
+                        "inflow_5d": inflow_5d,
+                        "inflow_10d": inflow_10d,
+                    }
+                    result["source_chain"].append(f"capital_stock:{stock_source}")
 
         sector_df, sector_source, sector_errors = self._call_df_candidates([
             ("stock_sector_fund_flow_rank", {}),
@@ -482,6 +713,14 @@ class AkshareFundamentalAdapter:
             "source_chain": [],
             "errors": [],
         }
+
+        # P1-3：龙虎榜优先取 Tushare top_list（窗口统计），失败回退 akshare。
+        tushare_dt = self._tushare_dragon_tiger(stock_code, lookback_days)
+        if tushare_dt is not None:
+            result.update(tushare_dt)
+            result["status"] = "ok"
+            result["source_chain"].append("dragon_tiger:tushare:top_list")
+            return result
 
         df, source, errors = self._call_df_candidates([
             ("stock_lhb_stock_statistic_em", {}),

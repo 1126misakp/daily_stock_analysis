@@ -2256,11 +2256,16 @@ class Config:
     @classmethod
     def _resolve_realtime_source_priority(cls) -> str:
         """
-        Resolve realtime source priority with automatic tushare injection.
+        Resolve realtime source priority with automatic paid-source injection.
 
-        When TUSHARE_TOKEN is configured but REALTIME_SOURCE_PRIORITY is not
-        explicitly set, automatically prepend 'tushare' to the default priority
-        so that the paid data source is utilized for realtime quotes as well.
+        When REALTIME_SOURCE_PRIORITY is not explicitly set, automatically
+        prepend configured paid sources to the default priority so they are
+        tried first:
+        - TUSHARE_TOKEN  -> prepend 'tushare'
+        - TICKFLOW_API_KEY -> prepend 'tickflow' (A股实时主力，排在 tushare 之前)
+
+        若两者都配置，顺序为 tickflow,tushare,<default>；都未配置则保持默认
+        （「不配置也可运行」）。显式 REALTIME_SOURCE_PRIORITY 优先于一切。
         """
         explicit = os.getenv('REALTIME_SOURCE_PRIORITY')
         default_priority = 'tencent,akshare_sina,efinance,akshare_em'
@@ -2269,19 +2274,24 @@ class Config:
             # User explicitly set priority, respect it
             return explicit
 
-        tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
-        if tushare_token:
-            # Token configured but no explicit priority override
-            # Prepend tushare so the paid source is tried first
+        priority_sources = default_priority.split(',')
+
+        # Prepend tushare when token configured (paid source first)
+        if os.getenv('TUSHARE_TOKEN', '').strip():
+            priority_sources.insert(0, 'tushare')
+
+        # 决策①：检测到 TICKFLOW_API_KEY 时把 tickflow 前置（实时主力，先于 tushare）
+        if os.getenv('TICKFLOW_API_KEY', '').strip():
+            priority_sources.insert(0, 'tickflow')
+
+        resolved = ','.join(priority_sources)
+        if resolved != default_priority:
             import logging
             logger = logging.getLogger(__name__)
-            resolved = f'tushare,{default_priority}'
             logger.info(
-                f"TUSHARE_TOKEN detected, auto-injecting tushare into realtime priority: {resolved}"
+                f"Paid realtime source(s) detected, auto-injecting into realtime priority: {resolved}"
             )
-            return resolved
-
-        return default_priority
+        return resolved
 
     @classmethod
     def reset_instance(cls) -> None:

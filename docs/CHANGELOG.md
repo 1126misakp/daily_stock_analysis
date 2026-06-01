@@ -49,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 将 `exchange-calendars` 依赖下限提升到 `4.13.0`，避免 pandas 3 环境导入交易日历时因 Timedelta 单位 `T` 失效导致分析失败。
 - [测试] 执行 `python -c "import exchange_calendars as xcals; xcals.get_calendar('XSHG'); print('ok')"` 通过验证，以覆盖导入与交易日历初始化兼容性。
 - [新功能] 普通分析与 Agent 运行时 Prompt 接入 AnalysisContextPack 低敏摘要，保持 history/API/Web 输出兼容。
+- [新功能] TickFlow 接入 A 股日K：配置 `TICKFLOW_API_KEY` 后 TickFlowFetcher 以 priority=-2 进入数据源链，成为 A 股日线主力（优先于 Tushare），akshare 等降为兜底；仅作用于 A 股，港美股路由不受影响。新增 `TICKFLOW_PRIORITY` 可调优先级，并提取公共代码转换函数 `to_exchange_suffixed_code`。
+- [新功能] TickFlow 接入 A 股实时报价：配置 `TICKFLOW_API_KEY` 后 `tickflow` 自动前置到 `REALTIME_SOURCE_PRIORITY`（先于 tushare），成为 A 股实时主力，tencent/akshare 等降为兜底；仅作用于 A 股，港美股实时路由不受影响。未配置 key 时保持原默认优先级，显式设置 `REALTIME_SOURCE_PRIORITY` 优先于自动注入。
+- [改进] 个股资金流/龙虎榜/财务成长指标/财务三表/十大股东持股变动优先取 Tushare（配置 `TUSHARE_TOKEN` 后经数据源链复用同一实例），akshare 降为兜底；单一来源失败自动回退 akshare，返回结构与字段键不变。资金流 `net_mf_amount` 由万元统一换算为元与 akshare 口径对齐；板块资金排行仍用 akshare。
+- [改进] 筹码分布优先取 Tushare `cyq_chips`（数据源链 priority 天然优先于 akshare），并修正 `ChipDistribution.source` 在 Tushare 来源时被默认标为 `akshare` 的标签问题。
+- [改进] 个股所属板块（`get_belong_boards`）优先取 Tushare：经 `ths_member`/`ths_index` 反查同花顺行业/概念/地域板块，并用 `index_member_all` 补充申万行业，akshare/efinance 降为兜底；板块/概念实时排行仍用 akshare。
+- [新功能] 新增 A 股分钟K线 `get_intraday_kline`（TickFlow，5m/15m/30m/60m）与五档盘口 `get_order_book`（TickFlow `depth`），仅 A 股、TickFlow 专属能力，未配置或失败时返回 None。
+- [新功能] 新增个股风险/估值上下文 `get_risk_context`（Tushare）：聚合估值快照(`daily_basic`)、涨跌停价、融资融券、未来解禁、股权质押、股东增减持、大宗交易、回购，按维度 fail-open，仅 A 股。
+- [改进] 涨停池 `get_limit_up_pool` 新增 TickFlow 自建来源：基于 `CN_Equity_A` 标的池实时行情与涨跌停价计算，priority=-2 优先于 akshare 兜底；无标的池权限或无涨停股时回退原有数据源。
+- [新功能] 新增龙虎榜席位游资近似标注 `get_hot_money_seats`（Tushare `top_inst` + 本地知名席位映射 `data_provider/hot_money_seats.py`），免上 Tushare 10000 档付费识别；为近似映射，仅供参考。
+- [修复] 涨停池 TickFlow 来源 `get_limit_up_pool` 在传入非当日（历史/未来）日期时返回 None 回退后续可查历史的数据源，避免把实时盘口快照误当成历史涨停池（兼容 `YYYYMMDD`/`YYYY-MM-DD`）。
+- [修复] 个股资金流 Tushare `moneyflow` 缺少 `trade_date` 列时改为 fail-open 返回 None 回退 akshare，避免排序抛 `KeyError` 绕过兜底拖垮资金流获取。
+- [修复] 游资席位标注 `get_hot_money_seats` 将本地映射模块导入纳入 fail-open，模块不可用时返回 `status="failed"` 而非向上抛异常拖垮主流程。
+- [改进] 游资席位标注 `get_hot_money_seats` 未显式指定日期时改取交易日历最近交易日（而非本机当天），避免周末/节假日/盘中按非交易日查询；当日确无本股席位时返回 `status="empty"` 与"已确认无游资"的 `ok` 区分。
+- [改进] A 股分钟K `get_intraday_kline` 与五档盘口 `get_order_book` 的 TickFlow 网络调用新增轻量重试，初次失败后重试一次、仍失败则降级返回 None 并记录可观测日志，避免瞬时失败直接落空且无法区分限流与无数据。
 
 ## [3.18.0] - 2026-05-21
 

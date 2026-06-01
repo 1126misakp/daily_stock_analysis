@@ -7,7 +7,11 @@ import unittest
 
 import pandas as pd
 
-from data_provider.base import DataFetcherManager, normalize_stock_code
+from data_provider.base import (
+    DataFetcherManager,
+    normalize_stock_code,
+    to_exchange_suffixed_code,
+)
 from data_provider.baostock_fetcher import BaostockFetcher
 from data_provider.pytdx_fetcher import PytdxFetcher
 from data_provider.tushare_fetcher import TushareFetcher
@@ -109,6 +113,44 @@ class TestTushareAShareCodeConversion(unittest.TestCase):
         self.assertEqual(fetcher._convert_stock_code("SZ600519"), "600519.SZ")
         self.assertEqual(fetcher._convert_stock_code("SZ.600519"), "600519.SZ")
         self.assertEqual(fetcher._convert_stock_code("ss.600519"), "600519.SH")
+
+
+class TestToExchangeSuffixedCode(unittest.TestCase):
+    """公共交易所后缀转换函数（供 Tushare/TickFlow 复用）。"""
+
+    def test_bare_a_share_codes(self) -> None:
+        self.assertEqual(to_exchange_suffixed_code("600000"), "600000.SH")
+        self.assertEqual(to_exchange_suffixed_code("601888"), "601888.SH")
+        self.assertEqual(to_exchange_suffixed_code("603259"), "603259.SH")
+        self.assertEqual(to_exchange_suffixed_code("605499"), "605499.SH")
+        self.assertEqual(to_exchange_suffixed_code("688981"), "688981.SH")
+        self.assertEqual(to_exchange_suffixed_code("000001"), "000001.SZ")
+        self.assertEqual(to_exchange_suffixed_code("002415"), "002415.SZ")
+        self.assertEqual(to_exchange_suffixed_code("300750"), "300750.SZ")
+        self.assertEqual(to_exchange_suffixed_code("301012"), "301012.SZ")
+
+    def test_etf_codes(self) -> None:
+        self.assertEqual(to_exchange_suffixed_code("510300"), "510300.SH")
+        self.assertEqual(to_exchange_suffixed_code("159919"), "159919.SZ")
+
+    def test_bse_codes(self) -> None:
+        self.assertEqual(to_exchange_suffixed_code("830799"), "830799.BJ")
+        self.assertEqual(to_exchange_suffixed_code("430047"), "430047.BJ")
+        self.assertEqual(to_exchange_suffixed_code("920748"), "920748.BJ")
+
+    def test_suffix_and_hint_preserved(self) -> None:
+        self.assertEqual(to_exchange_suffixed_code("600000.SH"), "600000.SH")
+        self.assertEqual(to_exchange_suffixed_code("000001.SZ"), "000001.SZ")
+        self.assertEqual(to_exchange_suffixed_code("SH000001"), "000001.SH")
+        self.assertEqual(to_exchange_suffixed_code("SZ600519"), "600519.SZ")
+        self.assertEqual(to_exchange_suffixed_code("ss.600519"), "600519.SH")
+
+    def test_non_a_share_returns_none(self) -> None:
+        self.assertIsNone(to_exchange_suffixed_code("HK00700"))
+        self.assertIsNone(to_exchange_suffixed_code("00700.HK"))
+        self.assertIsNone(to_exchange_suffixed_code("AAPL"))
+        self.assertIsNone(to_exchange_suffixed_code(""))
+        self.assertIsNone(to_exchange_suffixed_code("abc"))
 
 
 class TestNormalizeStockCode(unittest.TestCase):
