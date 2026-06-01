@@ -472,6 +472,44 @@ const BacktestPage: React.FC = () => {
         </p>
       </header>
 
+      {/* 新手说明卡片：解释「回测」的含义、出结果的前提，以及日期框的真实作用 */}
+      <div className="flex-shrink-0 px-3 pt-3 sm:px-4">
+        <Card variant="gradient" padding="md" className="max-w-5xl text-sm leading-relaxed">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="label-uppercase">关于策略回测</span>
+            <span className="text-xs text-muted-text">新手必看</span>
+          </div>
+          <div className="space-y-2 text-secondary-text">
+            <p>
+              <span className="font-medium text-foreground">这是什么：</span>
+              这里的「回测」是给系统<span className="text-foreground">过去生成的 AI 分析报告打分</span>——用股票之后真实的涨跌，反过来检验当时 AI 的预测/建议事后看准不准。它<span className="text-foreground">不是</span>「随便选一段历史行情、模拟买卖算收益」的那种回测。
+            </p>
+            <p>
+              <span className="font-medium text-foreground">怎么用：</span>
+              下方填股票代码（留空 = 全部自选股）、设好「评估窗口」，点 <span className="text-foreground">运行回测</span>。
+            </p>
+            <div>
+              <span className="font-medium text-foreground">能出结果的两个前提：</span>
+              <ol className="mt-1 list-decimal space-y-1 pl-5">
+                <li>
+                  要有<span className="text-foreground">足够旧</span>的历史分析记录——默认要求记录已生成满 <span className="text-foreground">14 天</span>（勾选「强制重跑」可放宽到不限天数）。
+                </li>
+                <li>
+                  分析日之后要<span className="text-foreground">已经走过「评估窗口」个交易日</span>的真实行情（默认约 <span className="text-foreground">10 个交易日</span>），系统才有数据判断对错；否则会显示<span className="text-warning">「数据不足」</span>。
+                </li>
+              </ol>
+            </div>
+            <p>
+              <span className="font-medium text-foreground">「开始 / 结束日期」是干嘛的：</span>
+              这两个框<span className="text-foreground">只用来筛选已经跑出来的结果</span>，<span className="text-foreground">不会触发</span>新的回测——所以单独改日期没反应是正常的。
+            </p>
+            <p className="text-xs text-muted-text">
+              新手小提示：刚部署、或刚加新自选股时，分析记录都太「新」，通常要等约 2～3 周、攒够「分析之后的未来行情」后，回测才会出现「已完成」的结果。在那之前点回测大多显示「数据不足」，属于正常现象，不是故障。
+            </p>
+          </div>
+        </Card>
+      </div>
+
       {/* Main content */}
       <main className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 lg:flex-row">
         {/* Left sidebar - Performance */}
