@@ -31,7 +31,7 @@ from tenacity import (
     before_sleep_log,
 )
 
-from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code, _is_hk_market
+from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code, _is_hk_market, detect_exchange_hint, to_exchange_suffixed_code
 from .realtime_types import UnifiedRealtimeQuote, ChipDistribution
 from src.config import get_config
 import os
@@ -143,6 +143,9 @@ class TushareFetcher(BaseFetcher):
         self._api: Optional[object] = None  # Tushare API 实例
         self.date_list: Optional[List[str]] = None  # 交易日列表缓存（倒序，最新日期在前）
         self._date_list_end: Optional[str] = None  # 缓存对应的截止日期，用于跨日刷新
+        # P2-1：ths_index 全量板块名/类型映射缓存（按自然日刷新），供反向板块查询 join
+        self._ths_index_map: Optional[Dict[str, tuple]] = None
+        self._ths_index_map_date: Optional[str] = None
 
         # 尝试初始化 API
         self._init_api()
@@ -263,6 +266,225 @@ class TushareFetcher(BaseFetcher):
         method = getattr(self._api, method_name)
         return method(**kwargs)
 
+    # ------------------------------------------------------------------
+    # P1：基本面 / 资金流 / 龙虎榜接口薄封装（返回原始 DataFrame，供
+    # fundamental_adapter 做 Tushare 优先取数；空或异常返回 None，遵循
+    # “单一数据源失败不拖垮主流程”的降级原则）。
+    # ------------------------------------------------------------------
+    def _fundamental_df(self, api_name: str, **kwargs) -> Optional[pd.DataFrame]:
+        if self._api is None:
+            return None
+        try:
+            df = self._call_api_with_rate_limit(api_name, **kwargs)
+        except Exception as exc:
+            logger.debug("[Tushare] %s 调用失败，降级: %s", api_name, exc)
+            return None
+        if df is None or df.empty:
+            return None
+        return df
+
+    def get_moneyflow(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        """个股资金流（moneyflow），按交易日返回多行。"""
+        kwargs: Dict[str, Any] = {"ts_code": self._convert_stock_code(stock_code)}
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+        return self._fundamental_df("moneyflow", **kwargs)
+
+    def get_top_list(self, trade_date: str) -> Optional[pd.DataFrame]:
+        """龙虎榜日榜（top_list），返回全市场当日上榜个股。"""
+        return self._fundamental_df("top_list", trade_date=trade_date)
+
+    def get_top_inst(self, trade_date: str) -> Optional[pd.DataFrame]:
+        """龙虎榜机构席位明细（top_inst），返回全市场当日席位。"""
+        return self._fundamental_df("top_inst", trade_date=trade_date)
+
+    def get_income_statement(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """利润表（income），返回多报告期。"""
+        return self._fundamental_df("income", ts_code=self._convert_stock_code(stock_code))
+
+    def get_cashflow_statement(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """现金流量表（cashflow），返回多报告期。"""
+        return self._fundamental_df("cashflow", ts_code=self._convert_stock_code(stock_code))
+
+    def get_fina_indicator(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """财务指标（fina_indicator），返回多报告期。"""
+        return self._fundamental_df("fina_indicator", ts_code=self._convert_stock_code(stock_code))
+
+    def get_top10_holders(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """前十大股东（top10_holders），返回多报告期。"""
+        return self._fundamental_df("top10_holders", ts_code=self._convert_stock_code(stock_code))
+
+    # ------------------------------------------------------------------
+    # P2-1：反向板块/概念成分查询。
+    # ths_member(con_code) 反查个股所属同花顺板块代码（不含板块名），
+    # join ths_index 取板块名+类型，仅保留 行业(I)/概念(N)/地域(R)；
+    # index_member_all(ts_code) 补充申万一级/二级行业。
+    # ------------------------------------------------------------------
+    # 同花顺板块类型 → 中文标签（仅保留这三类，过滤宽基/风格/策略/主题等噪音）
+    _THS_BOARD_TYPE_LABELS = {"I": "行业", "N": "概念", "R": "地域"}
+
+    def _get_ths_index_map(self) -> Dict[str, tuple]:
+        """缓存 ths_index 全量 {板块ts_code: (name, type)} 映射，按自然日刷新。"""
+        today = self._get_china_now().strftime("%Y%m%d")
+        if self._ths_index_map is not None and self._ths_index_map_date == today:
+            return self._ths_index_map
+
+        df = self._fundamental_df("ths_index")
+        mapping: Dict[str, tuple] = {}
+        if df is not None and "ts_code" in df.columns:
+            for _, row in df.iterrows():
+                code = str(row.get("ts_code") or "").strip()
+                if not code:
+                    continue
+                mapping[code] = (
+                    str(row.get("name") or "").strip(),
+                    str(row.get("type") or "").strip(),
+                )
+        self._ths_index_map = mapping
+        self._ths_index_map_date = today
+        return mapping
+
+    def get_belong_board(self, stock_code: str) -> Optional[List[Dict[str, Any]]]:
+        """获取个股所属板块（同花顺行业/概念/地域 + 申万行业）。
+
+        返回 ``[{"name", "code", "type"}]``（按 name 去重）；无数据或异常降级返回 None。
+        进入 DataFracherManager.get_belong_boards 链，Tushare priority=-1 优先于 efinance。
+        """
+        if self._api is None:
+            return None
+
+        ts_code = self._convert_stock_code(stock_code)
+        boards: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        # 1) 同花顺板块：反查板块代码 → join ths_index 取名+类型
+        mem = self._fundamental_df("ths_member", con_code=ts_code)
+        if mem is not None and "ts_code" in mem.columns:
+            index_map = self._get_ths_index_map()
+            for board_code in mem["ts_code"].tolist():
+                code = str(board_code or "").strip()
+                info = index_map.get(code)
+                if not info:
+                    continue
+                board_name, board_type = info
+                label = self._THS_BOARD_TYPE_LABELS.get(board_type)
+                if label is None or not board_name or board_name in seen:
+                    continue
+                seen.add(board_name)
+                boards.append({"name": board_name, "code": code, "type": label})
+
+        # 2) 申万行业（index_member_all）：补充 L1/L2 行业，去重后追加
+        sw = self._fundamental_df("index_member_all", ts_code=ts_code)
+        if sw is not None and not sw.empty:
+            row = sw.iloc[0]
+            for code_col, name_col in (("l1_code", "l1_name"), ("l2_code", "l2_name")):
+                name = str(row.get(name_col) or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                boards.append(
+                    {
+                        "name": name,
+                        "code": str(row.get(code_col) or "").strip(),
+                        "type": "行业",
+                    }
+                )
+
+        return boards or None
+
+    # ------------------------------------------------------------------
+    # P2-3：风险/估值接口薄封装（供 manager.get_risk_context 聚合）。
+    # 统一经 _fundamental_df：空/异常返回 None，降级不断流程。
+    # ------------------------------------------------------------------
+    def get_daily_basic(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        """每日估值指标（daily_basic）：pe/pb/ps/换手率/量比/市值等，按交易日多行。"""
+        kwargs: Dict[str, Any] = {"ts_code": self._convert_stock_code(stock_code)}
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+        return self._fundamental_df("daily_basic", **kwargs)
+
+    def get_stk_limit(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        """每日涨跌停价（stk_limit）。"""
+        kwargs: Dict[str, Any] = {"ts_code": self._convert_stock_code(stock_code)}
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+        return self._fundamental_df("stk_limit", **kwargs)
+
+    def get_share_float(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """限售股解禁（share_float），返回多条解禁记录。"""
+        return self._fundamental_df("share_float", ts_code=self._convert_stock_code(stock_code))
+
+    def get_pledge_detail(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """股权质押明细（pledge_detail）。"""
+        return self._fundamental_df("pledge_detail", ts_code=self._convert_stock_code(stock_code))
+
+    def get_holder_trade(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """股东增减持（stk_holdertrade）。"""
+        return self._fundamental_df("stk_holdertrade", ts_code=self._convert_stock_code(stock_code))
+
+    def get_margin_detail(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        """融资融券明细（margin_detail），按交易日多行。"""
+        kwargs: Dict[str, Any] = {"ts_code": self._convert_stock_code(stock_code)}
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+        return self._fundamental_df("margin_detail", **kwargs)
+
+    def get_block_trade(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        """大宗交易（block_trade）。"""
+        kwargs: Dict[str, Any] = {"ts_code": self._convert_stock_code(stock_code)}
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+        return self._fundamental_df("block_trade", **kwargs)
+
+    def get_repurchase(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        """股票回购（repurchase），按 ts_code 过滤（接口本身为全市场 ann_date 维度）。"""
+        kwargs: Dict[str, Any] = {"ts_code": self._convert_stock_code(stock_code)}
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+        return self._fundamental_df("repurchase", **kwargs)
+
     def _get_china_now(self) -> datetime:
         """返回上海时区当前时间，方便测试覆盖跨日刷新逻辑。"""
         return datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -311,15 +533,11 @@ class TushareFetcher(BaseFetcher):
 
     @staticmethod
     def _detect_exchange_hint(stock_code: str) -> Optional[str]:
-        """Return SH/SZ/BJ when the raw user input carries an explicit exchange hint."""
-        upper = (stock_code or "").strip().upper()
-        if upper.startswith(("SH", "SS")) or upper.endswith((".SH", ".SS")):
-            return "SH"
-        if upper.startswith("SZ") or upper.endswith(".SZ"):
-            return "SZ"
-        if upper.startswith("BJ") or upper.endswith(".BJ"):
-            return "BJ"
-        return None
+        """Return SH/SZ/BJ when the raw user input carries an explicit exchange hint.
+
+        交易所判定规则已统一到 base.detect_exchange_hint（单一真源），此处仅做转发以保持调用兼容。
+        """
+        return detect_exchange_hint(stock_code)
 
     @classmethod
     def _get_legacy_realtime_symbol(cls, stock_code: str) -> str:
@@ -377,36 +595,15 @@ class TushareFetcher(BaseFetcher):
             #raise DataFetchError(f"TushareFetcher 不支持港股 {raw_code}，请使用 AkshareFetcher")
             return normalize_stock_code(raw_code)
 
+        # A 股 / ETF / 北交所裸码：委托公共函数 to_exchange_suffixed_code（交易所判定的单一真源）
+        suffixed = to_exchange_suffixed_code(raw_code)
+        if suffixed:
+            return suffixed
+
+        # 兜底（极少触发：非标准长度等异常代码），保持历史“默认深市”行为
         code = normalize_stock_code(raw_code)
-        exchange_hint = self._detect_exchange_hint(raw_code)
-
-        if exchange_hint == "SH":
-            return f"{code}.SH"
-        if exchange_hint == "SZ":
-            return f"{code}.SZ"
-        if exchange_hint == "BJ":
-            return f"{code}.BJ"
-
-        # ETF: determine exchange by prefix
-        if code.startswith(_ETF_SH_PREFIXES) and len(code) == 6:
-            return f"{code}.SH"
-        if code.startswith(_ETF_SZ_PREFIXES) and len(code) == 6:
-            return f"{code}.SZ"
-        
-        # BSE (Beijing Stock Exchange): 8xxxxx, 4xxxxx, 920xxx
-        if is_bse_code(code):
-            return f"{code}.BJ"
-        
-        # Regular stocks
-        # Shanghai: 600xxx, 601xxx, 603xxx, 605xxx, 688xxx (STAR Market)
-        # Shenzhen: 000xxx, 001xxx, 002xxx, 003xxx, 300xxx, 301xxx (ChiNext)
-        if code.startswith(('600', '601', '603', '605', '688')):
-            return f"{code}.SH"
-        elif code.startswith(('000', '001', '002', '003', '300', '301')):
-            return f"{code}.SZ"
-        else:
-            logger.warning(f"无法确定股票 {code} 的市场，默认使用深市")
-            return f"{code}.SZ"
+        logger.warning(f"无法确定股票 {code} 的市场，默认使用深市")
+        return f"{code}.SZ"
 
     def _convert_hk_stock_code_for_tushare(self, stock_code: str) -> str:
         """
@@ -1174,6 +1371,7 @@ class TushareFetcher(BaseFetcher):
 
                 chip = ChipDistribution(
                     code=stock_code,
+                    source="tushare",
                     date=datetime.strptime(start_date, '%Y%m%d').strftime('%Y-%m-%d'),
                     profit_ratio=metrics['获利比例'],
                     avg_cost=metrics['平均成本'],

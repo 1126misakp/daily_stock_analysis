@@ -253,6 +253,71 @@ def is_kc_cy_stock(code: str) -> bool:
     return c.startswith("688") or c.startswith("30")
 
 
+# A 股 ETF 代码前缀（按交易所）
+_ETF_SH_PREFIXES = ('51', '52', '56', '58')
+_ETF_SZ_PREFIXES = ('15', '16', '18')
+
+
+def detect_exchange_hint(stock_code: str) -> Optional[str]:
+    """从用户原始输入中识别显式交易所标记（SH/SZ/BJ），无则返回 None。"""
+    upper = (stock_code or "").strip().upper()
+    if upper.startswith(("SH", "SS")) or upper.endswith((".SH", ".SS")):
+        return "SH"
+    if upper.startswith("SZ") or upper.endswith(".SZ"):
+        return "SZ"
+    if upper.startswith("BJ") or upper.endswith(".BJ"):
+        return "BJ"
+    return None
+
+
+def to_exchange_suffixed_code(stock_code: str) -> Optional[str]:
+    """将 A 股 / ETF / 北交所代码（裸码、带前缀或带后缀）统一转为带交易所后缀的形式。
+
+    例：``600000`` / ``SH600000`` / ``600000.SH`` → ``600000.SH``；``159919`` → ``159919.SZ``。
+
+    供 TushareFetcher 与 TickFlowFetcher 等需要带交易所后缀的数据源复用，
+    避免各自实现一套交易所判定规则（规则以本函数为单一真源）。
+
+    非 A 股（美股 / 港股）或无法识别为 6 位数字代码时返回 ``None``——
+    调用方据此判定该代码不归本数据源处理。
+    """
+    raw = (stock_code or "").strip()
+    if not raw:
+        return None
+
+    # 美股 / 港股不在本函数职责内，交由各自专用源处理
+    from .akshare_fetcher import _is_us_code  # 延迟导入，避免模块级循环依赖
+    if _is_us_code(raw) or _is_hk_market(raw):
+        return None
+
+    code = normalize_stock_code(raw)
+    if not (code.isdigit() and len(code) == 6):
+        return None
+
+    hint = detect_exchange_hint(raw)
+    if hint in ("SH", "SZ", "BJ"):
+        return f"{code}.{hint}"
+
+    # ETF：按代码前缀判定交易所
+    if code.startswith(_ETF_SH_PREFIXES):
+        return f"{code}.SH"
+    if code.startswith(_ETF_SZ_PREFIXES):
+        return f"{code}.SZ"
+
+    # 北交所：92xxxx / 43xxxx / 83xxxx 等
+    if is_bse_code(code):
+        return f"{code}.BJ"
+
+    # 普通股票：沪 600/601/603/605/688，深 000/001/002/003/300/301
+    if code.startswith(('600', '601', '603', '605', '688')):
+        return f"{code}.SH"
+    if code.startswith(('000', '001', '002', '003', '300', '301')):
+        return f"{code}.SZ"
+
+    # 无法精确判定的 6 位 A 股代码：默认深市（与历史行为一致）
+    return f"{code}.SZ"
+
+
 def canonical_stock_code(code: str) -> str:
     """
     Return the canonical (uppercase) form of a stock code.
@@ -564,6 +629,7 @@ class DataFetcherManager:
     """
 
     _DAILY_MARKET_FETCHER_SUPPORT = {
+        "TickFlowFetcher": {"cn"},
         "EfinanceFetcher": {"cn"},
         "AkshareFetcher": {"cn", "hk"},
         "TushareFetcher": {"cn", "hk"},
@@ -597,7 +663,11 @@ class DataFetcherManager:
         else:
             # 默认数据源将在首次使用时延迟加载
             self._init_default_fetchers()
-        self._fundamental_adapter = AkshareFundamentalAdapter()
+        # P1 决策②：注入懒回调复用链里已实例化的 TushareFetcher（共享限频）。
+        # adapter 优先取 Tushare（资金流/龙虎榜/财务），无实例时回退原 akshare。
+        self._fundamental_adapter = AkshareFundamentalAdapter(
+            tushare_provider=lambda: self._get_fetcher_by_name("TushareFetcher")
+        )
         self._yfinance_fundamental_adapter = YfinanceFundamentalAdapter()
         self._tickflow_fetcher = None
         self._tickflow_api_key: Optional[str] = None
@@ -1072,6 +1142,15 @@ class DataFetcherManager:
             optional_fetchers.append(TushareFetcher())  # 会根据 Token 配置自动调整优先级
         else:
             logger.debug("[数据源初始化] 跳过未配置的 TushareFetcher")
+
+        # TickFlow：配置了 api_key 才实例化进链，作为 A 股日线主力（priority=-2，优先于 Tushare 的 -1）。
+        # 注意：大盘复盘另有 _get_tickflow_fetcher() 懒加载的独立实例，二者互不影响。
+        tickflow_api_key = (getattr(config, "tickflow_api_key", None) or "").strip()
+        if tickflow_api_key:
+            from .tickflow_fetcher import TickFlowFetcher
+            optional_fetchers.append(TickFlowFetcher(api_key=tickflow_api_key))
+        else:
+            logger.debug("[数据源初始化] 跳过未配置的 TickFlowFetcher")
 
         has_longbridge_creds = bool(
             (getattr(config, "longbridge_app_key", None) or "").strip()
@@ -1555,6 +1634,11 @@ class DataFetcherManager:
                     if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
                         quote = self._call_fetcher_method(fetcher, 'get_realtime_quote', raw_stock_code or stock_code)
 
+                elif source == "tickflow":
+                    fetcher = self._get_fetcher_by_name("TickFlowFetcher", capability="realtime_quote")
+                    if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
+                        quote = self._call_fetcher_method(fetcher, 'get_realtime_quote', raw_stock_code or stock_code)
+
                 provider_name = fetcher.name if fetcher is not None else source
                 
                 if quote is not None and quote.has_basic_data():
@@ -1912,6 +1996,336 @@ class DataFetcherManager:
                 logger.debug(f"[{fetcher.name}] 获取所属板块失败: {e}")
                 continue
         return []
+
+    def get_intraday_kline(
+        self, stock_code: str, period: str = "5m", count: int = 240
+    ) -> Optional[pd.DataFrame]:
+        """获取 A 股分钟K线（TickFlow 专属能力，供 agent/策略调用）。
+
+        仅 A 股；未配置 TickFlow 或获取失败返回 None（新增能力，无兜底链）。
+        """
+        stock_code = normalize_stock_code(stock_code)
+        if _market_tag(stock_code) != "cn":
+            return None
+        fetcher = self._get_fetcher_by_name(
+            "TickFlowFetcher", capability="intraday_kline"
+        )
+        if fetcher is None or not hasattr(fetcher, "get_intraday_kline"):
+            return None
+        try:
+            return self._call_fetcher_method(
+                fetcher, "get_intraday_kline", stock_code, period=period, count=count
+            )
+        except Exception as e:
+            logger.warning(f"[TickFlowFetcher] 获取分钟K失败: {e}")
+            return None
+
+    def get_order_book(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """获取 A 股五档盘口（TickFlow 专属能力，供 agent/策略调用）。
+
+        仅 A 股；未配置 TickFlow 或获取失败返回 None（新增能力，无兜底链）。
+        """
+        stock_code = normalize_stock_code(stock_code)
+        if _market_tag(stock_code) != "cn":
+            return None
+        fetcher = self._get_fetcher_by_name(
+            "TickFlowFetcher", capability="order_book"
+        )
+        if fetcher is None or not hasattr(fetcher, "get_order_book"):
+            return None
+        try:
+            return self._call_fetcher_method(fetcher, "get_order_book", stock_code)
+        except Exception as e:
+            logger.warning(f"[TickFlowFetcher] 获取五档盘口失败: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # P2-3：风险/估值上下文。Tushare 专属聚合（A 股），fail-open：
+    # 单维度失败不影响其余维度；无 Tushare 实例返回 failed，非 A 股返回 not_supported。
+    # ------------------------------------------------------------------
+    _RISK_RECENT_LIMIT = 5  # 各明细类维度保留的最近记录条数
+
+    @staticmethod
+    def _risk_latest_row(df, date_col: str) -> Optional[Dict[str, Any]]:
+        """取 DataFrame 中 date_col 最大（最新）的一行为 dict。"""
+        if df is None or getattr(df, "empty", True) or date_col not in df.columns:
+            return None
+        row = df.sort_values(date_col).iloc[-1]
+        return {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
+
+    @classmethod
+    def _risk_recent_records(
+        cls, df, date_col: str, fields: List[str]
+    ) -> List[Dict[str, Any]]:
+        """取 date_col 倒序最近 _RISK_RECENT_LIMIT 条，仅保留 fields 字段。"""
+        if df is None or getattr(df, "empty", True):
+            return []
+        sorted_df = (
+            df.sort_values(date_col, ascending=False)
+            if date_col in df.columns
+            else df
+        )
+        records: List[Dict[str, Any]] = []
+        for _, row in sorted_df.head(cls._RISK_RECENT_LIMIT).iterrows():
+            item = {}
+            for f in fields:
+                v = row.get(f)
+                item[f] = None if (v is None or (not isinstance(v, (list, dict)) and pd.isna(v))) else v
+            records.append(item)
+        return records
+
+    def get_risk_context(self, stock_code: str) -> Dict[str, Any]:
+        """聚合个股风险/估值上下文（Tushare 专属，fail-open）。
+
+        维度：估值快照(daily_basic)、涨跌停价(stk_limit)、融资融券(margin_detail)、
+        未来解禁(share_float)、股权质押(pledge_detail)、股东增减持(stk_holdertrade)、
+        大宗交易(block_trade)、回购(repurchase)。
+        返回 ``{status, source, valuation, limit, margin, upcoming_float, pledge,
+        holder_trade, block_trade, repurchase, errors}``。
+        """
+        from datetime import timedelta
+
+        stock_code = normalize_stock_code(stock_code)
+        base_result: Dict[str, Any] = {
+            "source": "tushare",
+            "valuation": None,
+            "limit": None,
+            "margin": None,
+            "upcoming_float": [],
+            "pledge": {"count": 0, "latest_ann_date": None, "records": []},
+            "holder_trade": [],
+            "block_trade": [],
+            "repurchase": [],
+            "errors": [],
+        }
+
+        if _market_tag(stock_code) != "cn":
+            base_result["status"] = "not_supported"
+            return base_result
+
+        fetcher = self._get_fetcher_by_name("TushareFetcher")
+        if fetcher is None:
+            base_result["status"] = "failed"
+            base_result["errors"].append("TushareFetcher 不可用")
+            return base_result
+
+        now = datetime.now()
+        recent_start = (now - timedelta(days=30)).strftime("%Y%m%d")
+        wide_start = (now - timedelta(days=120)).strftime("%Y%m%d")
+        end_date = now.strftime("%Y%m%d")
+        today_compact = end_date
+
+        def _safe(method: str, *args, **kwargs):
+            try:
+                fn = getattr(fetcher, method, None)
+                if fn is None:
+                    return None
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                base_result["errors"].append(f"{method}: {exc}")
+                return None
+
+        # 估值快照（最新一日）
+        base_result["valuation"] = self._normalize_valuation(
+            _safe("get_daily_basic", stock_code, start_date=recent_start, end_date=end_date)
+        )
+        # 涨跌停价（最新一日）
+        limit_row = self._risk_latest_row(
+            _safe("get_stk_limit", stock_code, start_date=recent_start, end_date=end_date),
+            "trade_date",
+        )
+        if limit_row:
+            base_result["limit"] = {
+                "trade_date": limit_row.get("trade_date"),
+                "up_limit": limit_row.get("up_limit"),
+                "down_limit": limit_row.get("down_limit"),
+            }
+        # 融资融券（最新一日）
+        margin_row = self._risk_latest_row(
+            _safe("get_margin_detail", stock_code, start_date=recent_start, end_date=end_date),
+            "trade_date",
+        )
+        if margin_row:
+            base_result["margin"] = {
+                "trade_date": margin_row.get("trade_date"),
+                "rzye": margin_row.get("rzye"),
+                "rqye": margin_row.get("rqye"),
+                "rzrqye": margin_row.get("rzrqye"),
+            }
+        # 未来解禁（float_date >= 今天）
+        base_result["upcoming_float"] = self._normalize_upcoming_float(
+            _safe("get_share_float", stock_code), today_compact
+        )
+        # 股权质押（概览 + 最近记录）
+        pledge_df = _safe("get_pledge_detail", stock_code)
+        pledge_records = self._risk_recent_records(
+            pledge_df, "ann_date",
+            ["ann_date", "holder_name", "pledge_amount", "p_total_ratio"],
+        )
+        base_result["pledge"] = {
+            "count": 0 if pledge_df is None or getattr(pledge_df, "empty", True) else int(len(pledge_df)),
+            "latest_ann_date": pledge_records[0]["ann_date"] if pledge_records else None,
+            "records": pledge_records,
+        }
+        # 股东增减持
+        base_result["holder_trade"] = self._risk_recent_records(
+            _safe("get_holder_trade", stock_code), "ann_date",
+            ["ann_date", "holder_name", "in_de", "change_vol", "change_ratio", "avg_price"],
+        )
+        # 大宗交易
+        base_result["block_trade"] = self._risk_recent_records(
+            _safe("get_block_trade", stock_code, start_date=wide_start, end_date=end_date),
+            "trade_date",
+            ["trade_date", "price", "vol", "amount", "buyer", "seller"],
+        )
+        # 回购
+        base_result["repurchase"] = self._risk_recent_records(
+            _safe("get_repurchase", stock_code, start_date=wide_start, end_date=end_date),
+            "ann_date",
+            ["ann_date", "proc", "vol", "amount"],
+        )
+
+        has_any = any(
+            [
+                base_result["valuation"],
+                base_result["limit"],
+                base_result["margin"],
+                base_result["upcoming_float"],
+                base_result["pledge"]["records"],
+                base_result["holder_trade"],
+                base_result["block_trade"],
+                base_result["repurchase"],
+            ]
+        )
+        if not has_any:
+            base_result["status"] = "failed"
+        elif base_result["errors"]:
+            base_result["status"] = "partial"
+        else:
+            base_result["status"] = "ok"
+        return base_result
+
+    @classmethod
+    def _normalize_valuation(cls, df) -> Optional[Dict[str, Any]]:
+        """daily_basic 最新一行 → 估值快照 dict。"""
+        row = cls._risk_latest_row(df, "trade_date")
+        if not row:
+            return None
+        keys = (
+            "trade_date", "close", "turnover_rate", "volume_ratio",
+            "pe_ttm", "pb", "ps_ttm", "dv_ratio", "total_mv", "circ_mv",
+        )
+        return {k: row.get(k) for k in keys}
+
+    @classmethod
+    def _normalize_upcoming_float(cls, df, today_compact: str) -> List[Dict[str, Any]]:
+        """share_float 中 float_date >= 今天的未来解禁，按解禁日升序，最多保留近端若干条。"""
+        if df is None or getattr(df, "empty", True) or "float_date" not in df.columns:
+            return []
+        future = df[df["float_date"].astype(str) >= today_compact]
+        if future.empty:
+            return []
+        future = future.sort_values("float_date")
+        records: List[Dict[str, Any]] = []
+        for _, row in future.head(cls._RISK_RECENT_LIMIT).iterrows():
+            records.append(
+                {
+                    "float_date": row.get("float_date"),
+                    "float_share": None if pd.isna(row.get("float_share")) else row.get("float_share"),
+                    "float_ratio": None if pd.isna(row.get("float_ratio")) else row.get("float_ratio"),
+                    "holder_name": row.get("holder_name"),
+                    "share_type": row.get("share_type"),
+                }
+            )
+        return records
+
+    def get_hot_money_seats(
+        self, stock_code: str, trade_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """龙虎榜席位的游资近似标注（P2-5，Tushare top_inst + 本地映射）。
+
+        基于公开知名游资席位做子串匹配的近似"认人"，免上 Tushare 10000 档付费识别。
+        返回 ``{status, source, trade_date, seats, hot_money_count}``；
+        仅 A 股；无 Tushare 返回 failed，非 A 股返回 not_supported，当日无席位返回 empty。
+        ``trade_date`` 未显式指定时取交易日历最近交易日（而非本机当天，避免
+        周末/节假日/盘中按非交易日查询导致空结果）；取不到日历时回退本机当天。
+        """
+        stock_code = normalize_stock_code(stock_code)
+        result: Dict[str, Any] = {
+            "source": "tushare",
+            "trade_date": trade_date or datetime.now().strftime("%Y%m%d"),
+            "seats": [],
+            "hot_money_count": 0,
+        }
+
+        if _market_tag(stock_code) != "cn":
+            result["status"] = "not_supported"
+            return result
+
+        fetcher = self._get_fetcher_by_name("TushareFetcher")
+        if fetcher is None or not hasattr(fetcher, "get_top_inst"):
+            result["status"] = "failed"
+            return result
+
+        # W1：未显式指定时用交易日历最近交易日覆盖默认的本机当天
+        if not trade_date:
+            trade_date = self._latest_trade_date_for(fetcher)
+            result["trade_date"] = trade_date
+
+        # 游资席位映射模块导入失败不应拖垮主流程，fail-open 返回 failed
+        try:
+            from .hot_money_seats import classify_seat
+        except Exception as e:
+            logger.warning(f"[hot_money_seats] 游资席位映射模块导入失败: {e}")
+            result["status"] = "failed"
+            return result
+
+        try:
+            df = fetcher.get_top_inst(trade_date)
+        except Exception as e:
+            logger.warning(f"[TushareFetcher] 获取龙虎榜席位失败: {e}")
+            result["status"] = "failed"
+            return result
+
+        seats: List[Dict[str, Any]] = []
+        if df is not None and not getattr(df, "empty", True) and "exalter" in df.columns:
+            subset = df
+            # top_inst 为全市场当日席位，按裸 6 位代码过滤本股（ts_code 形如 600000.SH）
+            if "ts_code" in df.columns:
+                naked = df["ts_code"].astype(str).str.split(".").str[0]
+                subset = df[naked == stock_code]
+            for _, row in subset.iterrows():
+                exalter = row.get("exalter")
+                seats.append(
+                    {
+                        "exalter": exalter,
+                        "side": row.get("side"),
+                        "buy": None if pd.isna(row.get("buy")) else row.get("buy"),
+                        "sell": None if pd.isna(row.get("sell")) else row.get("sell"),
+                        "net_buy": None if pd.isna(row.get("net_buy")) else row.get("net_buy"),
+                        "hot_money": classify_seat(exalter),
+                    }
+                )
+
+        result["seats"] = seats
+        result["hot_money_count"] = sum(1 for s in seats if s["hot_money"])
+        # W2：当日确无本股席位时用 empty 区分，避免调用方误判为"已确认无游资"
+        result["status"] = "ok" if seats else "empty"
+        return result
+
+    @staticmethod
+    def _latest_trade_date_for(fetcher: Any) -> str:
+        """取交易日历最近交易日（YYYYMMDD）；无能力/异常/空时回退本机当天。"""
+        fallback = datetime.now().strftime("%Y%m%d")
+        getter = getattr(fetcher, "_get_trade_dates", None)
+        if not callable(getter):
+            return fallback
+        try:
+            dates = getter()
+        except Exception as e:
+            logger.debug(f"[hot_money_seats] 交易日历获取失败，回退本机当天: {e}")
+            return fallback
+        return dates[0] if dates else fallback
 
     def prefetch_stock_names(self, stock_codes: List[str], use_bulk: bool = False) -> None:
         """
