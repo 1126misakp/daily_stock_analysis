@@ -77,6 +77,7 @@ class Skill:
     execution_context: str = "inline"
     subagent_type: str = ""
     preferred_model: str = ""
+    trading_style: str = ""
 
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?(.*)$", re.DOTALL)
@@ -199,6 +200,7 @@ def load_skill_from_yaml(filepath: Union[str, Path]) -> Skill:
         execution_context=str(data.get("context", "inline")).strip() or "inline",
         subagent_type=str(data.get("agent", "")).strip(),
         preferred_model=str(data.get("model", "")).strip(),
+        trading_style=str(data.get("trading_style", "")).strip(),
     )
 
 
@@ -268,6 +270,7 @@ def load_skill_from_markdown(filepath: Union[str, Path]) -> Skill:
         execution_context=str(metadata.get("context", "inline")).strip() or "inline",
         subagent_type=str(metadata.get("agent", "")).strip(),
         preferred_model=str(metadata.get("model", "")).strip(),
+        trading_style=str(metadata.get("trading_style", "")).strip(),
     )
 
 

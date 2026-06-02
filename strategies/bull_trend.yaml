@@ -3,6 +3,7 @@
 name: bull_trend
 display_name: 默认多头趋势
 description: 默认个股分析优先策略，识别多头排列、趋势延续与回踩低吸机会。
+trading_style: 趋势跟随、中性偏进取
 category: trend
 core_rules: [1, 2, 3]
 required_tools:

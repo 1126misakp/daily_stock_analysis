@@ -95,3 +95,11 @@ def test_growth_quality_filters_by_valuation():
             {"code": "000004", "name": "D", "pe": 25.0, "pb": 3.0, "total_mv": 2e5}]  # 市值过小剔除
     out = st.STRATEGY_SCORERS["growth_quality"](_panel(rows))
     assert list(out["code"]) == ["000001"]
+
+
+def test_skill_loads_trading_style(tmp_path):
+    from src.agent.skills.base import load_skill_from_yaml
+    f = tmp_path / "s.yaml"
+    f.write_text("name: x\ndisplay_name: X\ndescription: d\ninstructions: i\ntrading_style: 抄底、左侧反转\n", encoding="utf-8")
+    skill = load_skill_from_yaml(f)
+    assert skill.trading_style == "抄底、左侧反转"

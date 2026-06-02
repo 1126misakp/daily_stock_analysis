@@ -4,6 +4,7 @@
 name: one_yang_three_yin
 display_name: 一阳夹三阴
 description: 检测一阳夹三阴K线整理形态，趋势延续入场信号。
+trading_style: 趋势延续入场、中性
 category: pattern
 core_rules: [2, 4]
 required_tools:
