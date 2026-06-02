@@ -110,7 +110,7 @@ class SystemConfigService:
             "skill": "specialist",
         }
     }
-    _SERVER_MASKED_CONFIG_KEYS: Set[str] = {"ALPHASIFT_INSTALL_SPEC"}
+    _SERVER_MASKED_CONFIG_KEYS: Set[str] = set()
     _NOTIFICATION_TEST_CHANNELS: Tuple[str, ...] = (
         "wechat",
         "feishu",
