@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_DAYS = 60
 STRATEGY_POOL_CAP = 80
 PREFERENCE_POOL_CAP = 150
-MIN_AMOUNT = 1e7   # 基础流动性：成交额 > 1000 万
+MIN_AMOUNT = 5e7   # 基础流动性：成交额 > 5000 万元（单位：元，latest.amount 已由千元换算为元）
 
 
 class ScreenInputError(ValueError):

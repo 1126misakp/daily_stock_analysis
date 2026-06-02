@@ -69,7 +69,9 @@ def build_panel_from_frames(daily, basic, names, industry, trade_date) -> Market
             "code": code, "name": names.get(code, code),
             "close": float(last["close"]), "open_": float(last["open"]),
             "high": float(last["high"]), "low": float(last["low"]),
-            "vol": float(last["vol"]), "amount": float(last["amount"]),
+            # Tushare daily 的 amount 单位为千元，统一换算为元存入 latest，
+            # 与下游 MIN_AMOUNT（元）及前端 formatAmount（按元格式化）口径一致
+            "vol": float(last["vol"]), "amount": float(last["amount"]) * 1000,
             "change_pct": change_pct,
             "ma5": ma5, "ma10": ma10, "ma20": ma20,
             "ma5_prev": ma5_prev, "ma10_prev": ma10_prev,

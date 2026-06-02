@@ -34,6 +34,22 @@ def test_build_panel_computes_features():
     assert panel.names["000001"] == "平安银行"
 
 
+def test_build_panel_amount_converts_thousand_yuan_to_yuan():
+    # Tushare daily 的 amount 单位为千元，build_panel 须换算为元（×1000）
+    dates = ["20260530", "20260602"]
+    closes = [10.0, 10.0]
+    vols = [1000, 1000]
+    raw = _daily("000001.SZ", dates, closes, vols)
+    last_amount_thousand = float(raw.iloc[-1]["amount"])  # 原始千元口径
+    daily = pd.concat([raw], ignore_index=True)
+    basic = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20260602"],
+                          "pe": [15.0], "pb": [1.5], "total_mv": [5e6],
+                          "turnover_rate": [2.0], "volume_ratio": [1.0]})
+    panel = build_panel_from_frames(daily, basic, {"000001": "平安银行"},
+                                    {"000001": "银行"}, trade_date="20260602")
+    assert panel.latest.loc["000001"]["amount"] == last_amount_thousand * 1000
+
+
 def test_fetch_market_panel_uses_tushare_batch(monkeypatch):
     from src.services.stock_screener import market_data as md
     calls = {"daily": 0}
