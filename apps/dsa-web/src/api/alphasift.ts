@@ -4,6 +4,7 @@ import { toCamelCase } from './utils';
 
 const ALPHASIFT_SCREEN_TIMEOUT_MS = 180000;
 const ALPHASIFT_INSTALL_TIMEOUT_MS = 300000;
+const ALPHASIFT_JOB_API_TIMEOUT_MS = 30000;
 export const ALPHASIFT_CONFIG_CHANGED_EVENT = 'alphasift-config-changed';
 export const SYSTEM_CONFIG_CHANGED_EVENT = 'dsa-system-config-changed';
 
@@ -90,6 +91,17 @@ export type AlphaSiftScreenResponse = {
   sourceErrors?: string[];
 };
 
+export type AlphaSiftScreenJobSubmit = {
+  jobId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+};
+
+export type AlphaSiftScreenJobResult = AlphaSiftScreenResponse & {
+  jobId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  error?: string;
+};
+
 export function notifyAlphaSiftConfigChanged(): void {
   window.dispatchEvent(new Event(ALPHASIFT_CONFIG_CHANGED_EVENT));
   notifySystemConfigChanged();
@@ -123,6 +135,23 @@ export const alphasiftApi = {
       max_results: payload.maxResults,
     }, { timeout: ALPHASIFT_SCREEN_TIMEOUT_MS });
     return toCamelCase<AlphaSiftScreenResponse>(response.data);
+  },
+
+  async submitScreenJob(payload: { market: string; strategy: string; maxResults: number }): Promise<AlphaSiftScreenJobSubmit> {
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/alphasift/screen/jobs', {
+      market: payload.market,
+      strategy: payload.strategy,
+      max_results: payload.maxResults,
+    }, { timeout: ALPHASIFT_JOB_API_TIMEOUT_MS });
+    return toCamelCase<AlphaSiftScreenJobSubmit>(response.data);
+  },
+
+  async getScreenJob(jobId: string): Promise<AlphaSiftScreenJobResult> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/alphasift/screen/jobs/${jobId}`,
+      { timeout: ALPHASIFT_JOB_API_TIMEOUT_MS },
+    );
+    return toCamelCase<AlphaSiftScreenJobResult>(response.data);
   },
 
   async getStrategies(): Promise<AlphaSiftStrategiesResponse> {

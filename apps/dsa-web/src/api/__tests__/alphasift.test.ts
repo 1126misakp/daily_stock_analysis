@@ -146,4 +146,38 @@ describe('alphasiftApi', () => {
       { timeout: 180000 }
     );
   });
+
+  it('submits a screen job and returns camelCased job info', async () => {
+    post.mockResolvedValueOnce({ data: { job_id: 'abc123', status: 'pending' } });
+
+    const result = await alphasiftApi.submitScreenJob({ market: 'cn', strategy: 'dual_low', maxResults: 3 });
+
+    expect(post).toHaveBeenCalledWith(
+      '/api/v1/alphasift/screen/jobs',
+      { market: 'cn', strategy: 'dual_low', max_results: 3 },
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    );
+    expect(result.jobId).toBe('abc123');
+    expect(result.status).toBe('pending');
+  });
+
+  it('gets a screen job and camelCases the completed payload', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        job_id: 'abc123',
+        status: 'completed',
+        candidate_count: 1,
+        candidates: [{ code: '600519', name: 'MT', rank: 1, reason: '' }],
+        llm_ranked: true,
+      },
+    });
+
+    const result = await alphasiftApi.getScreenJob('abc123');
+
+    expect(get).toHaveBeenCalledWith('/api/v1/alphasift/screen/jobs/abc123', expect.any(Object));
+    expect(result.status).toBe('completed');
+    expect(result.candidateCount).toBe(1);
+    expect(result.candidates[0].code).toBe('600519');
+    expect(result.llmRanked).toBe(true);
+  });
 });
