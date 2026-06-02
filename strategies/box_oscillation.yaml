@@ -4,6 +4,7 @@
 name: box_oscillation
 display_name: 箱体震荡
 description: 识别价格箱体区间，在箱底买入、箱顶减仓，适用于横盘震荡行情。
+trading_style: 高抛低吸、稳健
 category: framework
 core_rules: [1, 2, 3]
 required_tools:

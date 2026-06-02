@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""AlphaSift 选股异步 job 存储（内存、单 worker、幂等复用）。
+"""选股异步 job 存储（内存、单 worker、幂等复用）。
 
-选股是耗时 ~7 分钟的全市场扫描，必须异步化以绕开前置 CDN 的 100s 超时上限。
+选股是耗时的全市场扫描，必须异步化以绕开前置 CDN 的 100s 超时上限。
 结果仅存内存、不持久化（探索性操作，刷新/重启即弃）。
 """
 
@@ -27,9 +27,9 @@ _FINISHED_STATUSES = ("completed", "failed")
 @dataclass
 class ScreenJob:
     job_id: str
-    market: str
-    strategy: str
     max_results: int
+    strategy: Optional[str] = None
+    preference: Optional[str] = None
     status: str = "pending"  # pending | running | completed | failed
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -38,24 +38,24 @@ class ScreenJob:
     finished_at: Optional[float] = None
 
 
-class AlphaSiftScreenJobStore:
+class ScreenJobStore:
     """内存 job 存储。单例通过 get_instance() 获取；测试可直接实例化。"""
 
     MAX_JOBS = 20
     TTL_SECONDS = 3600
 
-    _instance: Optional["AlphaSiftScreenJobStore"] = None
+    _instance: Optional["ScreenJobStore"] = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
         self._jobs: Dict[str, ScreenJob] = {}
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="alphasift_screen_"
+            max_workers=1, thread_name_prefix="screen_"
         )
 
     @classmethod
-    def get_instance(cls) -> "AlphaSiftScreenJobStore":
+    def get_instance(cls) -> "ScreenJobStore":
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
@@ -64,8 +64,8 @@ class AlphaSiftScreenJobStore:
 
     def submit(
         self,
-        market: str,
-        strategy: str,
+        strategy: Optional[str],
+        preference: Optional[str],
         max_results: int,
         run_fn: ScreenRunFn,
     ) -> ScreenJob:
@@ -73,21 +73,21 @@ class AlphaSiftScreenJobStore:
             active = self._active_job_locked()
             if active is not None:
                 logger.info(
-                    "AlphaSift 选股已有进行中任务 %s，复用并忽略本次参数 strategy=%s max_results=%s",
-                    active.job_id, strategy, max_results,
+                    "选股已有进行中任务 %s，复用并忽略本次参数 strategy=%s preference=%s max_results=%s",
+                    active.job_id, strategy, preference, max_results,
                 )
                 return copy.copy(active)  # 幂等复用进行中的任务，绝不排队
             job = ScreenJob(
                 job_id=uuid.uuid4().hex[:12],
-                market=market,
                 strategy=strategy,
+                preference=preference,
                 max_results=max_results,
             )
             self._jobs[job.job_id] = job
             self._cleanup_locked()  # 插入后清理：TTL 过期 + 容量封顶（只淘汰已完成 job）
             logger.info(
-                "AlphaSift 选股任务已提交 job_id=%s strategy=%s market=%s",
-                job.job_id, strategy, market,
+                "选股任务已提交 job_id=%s strategy=%s preference=%s",
+                job.job_id, strategy, preference,
             )
             # 提交时刻的快照：保证调用方拿到的对象反映「提交时」状态（pending），
             # 不会被 worker 线程异步改写；存储里仍保留 live 对象供 get() 反映最新进度。
@@ -104,12 +104,12 @@ class AlphaSiftScreenJobStore:
         job.started_at = time.time()
         try:
             job.result = run_fn(
-                market=job.market,
                 strategy=job.strategy,
+                preference=job.preference,
                 max_results=job.max_results,
             )
             job.status = "completed"
-            logger.info("AlphaSift 选股任务完成 job_id=%s", job.job_id)
+            logger.info("选股任务完成 job_id=%s", job.job_id)
         except Exception as exc:  # noqa: BLE001 - 任何失败都落到 job.error
             detail = getattr(exc, "detail", None)
             if isinstance(detail, dict) and detail.get("message"):
@@ -117,7 +117,7 @@ class AlphaSiftScreenJobStore:
             else:
                 job.error = str(exc) or exc.__class__.__name__
             job.status = "failed"
-            logger.exception("AlphaSift 选股任务失败 job_id=%s", job.job_id)
+            logger.exception("选股任务失败 job_id=%s", job.job_id)
         finally:
             job.finished_at = time.time()
 

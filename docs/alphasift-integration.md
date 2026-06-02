@@ -1,5 +1,8 @@
 # AlphaSift 选股集成说明
 
+> ⚠️ 已下线：AlphaSift 选股渠道已由内置「自研选股引擎」替换，相关 API 端点与前端入口已移除。
+> 新选股能力见 [`docs/stock-screener.md`](stock-screener.md)。本文档仅作历史归档保留。
+
 AlphaSift 作为第三方选股能力接入 DSA。DSA 默认不启用它，也不把 AlphaSift 的策略逻辑复制进主仓库；启用后只通过 `alphasift.dsa_adapter` 稳定适配层调用 AlphaSift。
 
 ## 当前方案
