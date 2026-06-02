@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 自研选股修正成交额单位（Tushare daily amount 千元换算为元）并将流动性阈值调整为 5000 万元，修复仅按偏好选股几乎总返回空的问题。
+- [修复] 自研选股 LLM 重排兼容代码围栏包裹、含 trailing comma 及前后多余文本的 JSON 响应，减少误降级。
+- [改进] 自研选股收紧 box_oscillation（贴底阈值收紧至 4% 并按贴底程度打分）与 growth_quality（PE 区间收紧至 (0,40]、市值门槛提升至 50 亿）足切条件，降低候选池截断时同分丢优问题。
 - [改进] 策略回测页新增常驻「新手必看」说明卡片，解释回测含义、出结果的两个前提（记录天龄与评估窗口），并澄清「开始/结束日期」仅用于筛选已有结果、不触发回测。
 - [新功能] 自研选股引擎替换 AlphaSift：全市场量化足切 + LLM 轻量重排，支持 8 策略与用户偏好，选股入口常驻无需安装。
 - [改进] 选股端点改名为 /api/v1/screen/*，移除 AlphaSift 第三方依赖与安装/状态/启用相关 Web 设置。

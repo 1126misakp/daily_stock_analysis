@@ -90,10 +90,13 @@ def box_oscillation(panel: MarketPanel) -> pd.DataFrame:
         if not (0.05 <= width <= 0.50):     # 太窄无空间，太宽非箱体
             continue
         price = float(g.iloc[-1]["close"])
-        near_bottom = (price - bottom) / bottom <= 0.05
-        if near_bottom:
+        dist_to_bottom = (price - bottom) / bottom
+        # 贴底阈值由 ≤5% 收紧到 ≤4%；越贴近箱底分越高，
+        # 便于截断 Top80 时优先取到最贴底的标的
+        if 0 <= dist_to_bottom <= 0.04:
             name = panel.names.get(code, code)
-            hits.append({"code": code, "name": name, "signal_score": 10.0,
+            score = 10.0 + (0.04 - dist_to_bottom) / 0.04 * 5
+            hits.append({"code": code, "name": name, "signal_score": score,
                          "signal_detail": f"箱体震荡：现价贴近箱底（{bottom:.2f}~{top:.2f}）"})
     return pd.DataFrame(hits, columns=["code", "name", "signal_score", "signal_detail"])
 
@@ -103,7 +106,8 @@ def growth_quality(panel: MarketPanel) -> pd.DataFrame:
     df = panel.latest
     pe = pd.to_numeric(df.get("pe"), errors="coerce")
     total_mv = pd.to_numeric(df.get("total_mv"), errors="coerce")  # 单位：万元
-    cond = (pe > 0) & (pe < 80) & (total_mv > 3e5)   # 盈利、估值不过热、市值>30亿
+    # 收紧足切：PE 区间 (0, 40]、市值 > 50 亿（total_mv 单位万元）
+    cond = (pe > 0) & (pe <= 40) & (total_mv > 5e6)
     score = cond.astype(float) * (15 - (pe.clip(upper=80) / 80) * 5)
     return _emit(df, score.where(cond, 0), "成长质量：盈利且估值合理，待LLM核成长")
 
