@@ -70,15 +70,23 @@
 - 内存字典 `job_id -> JobRecord`：
   - `JobRecord{ job_id, status(pending|running|completed|failed), request(market/strategy/max_results), result(dict|None), error(str|None), created_at, started_at, finished_at }`
 - `ThreadPoolExecutor(max_workers=1)`：选股吃内存，**串行**执行，避免容器 OOM（生产 server 容器有内存限制）。
-- TTL/容量控制：仅保留最近 N 条（建议 20）且超过 1 小时的记录在新提交时清理，防止内存无限增长。
+- TTL/容量控制：仅保留最近 20 条、且新提交时清理超过 1 小时的旧记录，防止内存无限增长。**不单独起后台清理线程/定时器（YAGNI）**——完成的 job 至多驻留到下次提交或进程重启。
 - 接口：`submit(market, strategy, max_results, run_fn) -> job_id`；`get(job_id) -> JobRecord | None`。
 - worker 内捕获异常写入 `error`，正常写入 `result`。
+
+**并发策略（写死，不排队）**
+- store 维护"当前活跃 job"指针（status 为 pending/running 的 job）。
+- `submit()` 时若已存在活跃 job：**直接返回该活跃 job 的 `job_id`（幂等复用）**，不再新建、不排队。前端表现为"已有选股在运行，复用进行中的任务"。
+- 理由：`max_workers=1` 若放任新建会把重复点击/多标签页请求排成队列（第二次点击要等 14 分钟）。幂等复用最简、对用户最友好。
+- 注意"复用"语义：活跃期内即使用户改了 strategy/max_results 再点，也复用旧 job（返回旧结果）；此为已知取舍，前端文案需体现"正在运行中"。
+- 服务端必须做此判断——前端按钮在轮询期已 `disabled`（`StockScreeningPage.tsx` 现有 `disabled={!enabled || loading}`），但跨标签页/直调 API 仍可绕过。
 
 **重构 `api/v1/endpoints/alphasift.py`**
 - 把现有 `alphasift_screen()` 里"调用适配层 + 规范化返回"的核心抽成独立函数：
   `run_alphasift_screen(config, *, market, strategy, max_results) -> dict`（返回与现有 `/screen` 响应体一致的 dict）。
-- **原 `POST /api/v1/alphasift/screen` 端点保留不变**，内部改为调用 `run_alphasift_screen`（行为等价）。
+- **原 `POST /api/v1/alphasift/screen` 端点保留**，内部改为调用 `run_alphasift_screen`。
 - job worker 也调用同一个 `run_alphasift_screen`，逻辑 DRY。
+- ⚠️ **行为变化说明（修正原"完全等价"措辞）**：LLM 环境注入（§3.2）放在 `run_alphasift_screen` 内部，因此**同步 `/screen` 端点的 LLM 重排也会一并接上 MiMo**（用户已确认，见 §3.2 决策）——这是预期的副带改进。响应体仍为现有 16 个字段（`candidates`/`run_id`/`llm_ranked` 等，见 `alphasift.py:225-242`），**结构不变，仅 `llm_ranked` 由 false 变 true**。验收需确认同步端点响应体结构未变更。
 
 **新增追加式端点**
 - `POST /api/v1/alphasift/screen/jobs`
@@ -87,15 +95,36 @@
   - 校验通过 → `store.submit(...)` 建 job → 立即返回 `{ job_id, status: "pending" }`。耗时 <1s，不触发 CDN 超时。
 - `GET /api/v1/alphasift/screen/jobs/{job_id}`
   - 返回 `{ job_id, status }`；`completed` 时附带完整选股结果字段（同 `/screen` 响应体）；`failed` 时附 `error`（message + 可选 error code）；未知 job_id → 404。
+  - **纯内存查询**：仅读 job store，**不调用任何 AlphaSift 适配层**（不 `_call_alphasift_status` / 不 import 触发），保证 ~4s 一次的轮询零额外开销。
 
 > 鉴权：沿用现有全局认证中间件（`/api/v1/*` 需有效管理员会话），与现有 `/screen` 一致，新增端点无需特殊处理。
 
 ### 3.2 LLM 接入 MiMo
 
-- 新增/扩展运行时环境准备（与现有 `_prepare_alphasift_runtime_env` 同款做法）：在调用 `run_alphasift_screen` 前，从 DSA 已解析的**主 LLM 渠道**（`config.llm_channels` 中与当前激活模型对应、或第一个 enabled 的渠道）取 `api_keys[0]` 与 `base_url`，分别注入进程环境的 `LLM_API_KEY` / `LLM_BASE_URL`。
-- **仅当对应环境变量尚未设置时注入**（不覆盖用户显式配置）。
-- 动态取值（按渠道），将来切 DeepSeek 等兜底渠道也自动适配。
-- `LLM_API_KEY`/`LLM_BASE_URL` 不在 DSA 自身配置变量集合内，注入不影响 DSA 自有 LLM 路由。
+**用户决策**：同步 `/screen` 与 job 路径**都接上 MiMo**（注入放在共享函数 `run_alphasift_screen` 内，二者统一生效）。
+
+**主渠道取值规则（写死，避免 AI 自创）**
+- `channel = next((c for c in config.llm_channels if c.get("api_keys")), None)`（取第一个含 api_keys 的渠道）。
+- 取不到则**跳过注入、不报错**，让 AlphaSift 回退普通打分（与现状一致）。
+- 理由：当前生产仅单渠道 `LLM_CHANNELS=mimo`（CLAUDE.md 第二节），第一个即主渠道，足够。将来多渠道再按激活模型 `config.litellm_model` 精确反查——**本次不做**（YAGNI）。
+- `config.llm_channels` 每项结构经核实为 `{name, protocol, enabled, base_url, api_keys, models, extra_headers}`（`src/config.py:1935-1943`），且 disabled 渠道在解析阶段已被过滤，故"第一个"即"第一个 enabled"。
+
+**注入方式（修正：临时 try/finally，不用"仅当未设置时注入"）**
+- 在 `run_alphasift_screen` 内，调用适配层 `screen()` 前后用 `try/finally` **临时设置并还原** `LLM_API_KEY` / `LLM_BASE_URL`：
+  ```python
+  prev_key = os.environ.get("LLM_API_KEY")
+  prev_base = os.environ.get("LLM_BASE_URL")
+  os.environ["LLM_API_KEY"] = mimo_key
+  os.environ["LLM_BASE_URL"] = mimo_base
+  try:
+      ...  # 调适配层 screen
+  finally:
+      _restore("LLM_API_KEY", prev_key)   # 原值恢复；原本无则 del
+      _restore("LLM_BASE_URL", prev_base)
+  ```
+- 这样保证：①**每次都用最新配置**（避免"切 MiMo key / 换 DeepSeek 兜底后选股仍用旧值"的隐藏 bug）；②不污染长期进程环境；③不影响 DSA 自有 LLM 路由（DSA 不读 `LLM_API_KEY`/`LLM_BASE_URL`）。
+- `max_workers=1` 选股串行执行，临时变量不会与另一个选股 worker 串扰。
+- STRATEGIES_DIR 仍沿用现有 `_prepare_alphasift_runtime_env`（一次性准备即可，与 LLM 临时注入分开）。
 - 敏感值只在进程内存中流转，不写日志、不回显。
 
 ### 3.3 前端
@@ -105,10 +134,17 @@
   - 新增 `getScreenJob(jobId) -> { status, ...result }`（GET，短超时）。
   - 保留或基于上述重写原 `screen()`（页面改用 job 流）。
 - `apps/dsa-web/src/pages/StockScreeningPage.tsx`
-  - 「运行选股」handler 改为：`submitScreenJob` → 每 ~4s 轮询 `getScreenJob` 直到 `completed`/`failed`。
+  - 「运行选股」handler 改为：`submitScreenJob` → 每 ~4s 轮询 `getScreenJob`。
   - 轮询期间展示进度态：转圈 + 已用时 + 文案「选股需扫描全市场，预计需几分钟，请勿关闭页面」。
-  - `completed` → 用现有候选渲染组件展示结果；`failed` → 用现有 `parseApiError` 错误展示。
-  - **无客户端硬超时**（或设宽松上限如 15min），CDN 100s 不再相关（每次轮询请求都是秒级）。
+  - **轮询处置状态机（写死）**：
+    | 轮询结果 | 处置 |
+    |---------|------|
+    | HTTP 200 + `pending`/`running` | 继续轮询，更新已用时 |
+    | HTTP 200 + `completed` | 停止轮询，用现有候选渲染组件展示结果 |
+    | HTTP 200 + `failed` | 停止轮询，用现有 `parseApiError` 展示 `error` |
+    | **HTTP 404** | **立即停止轮询**，提示「任务已结束或服务重启，结果未保留，请重新运行」，恢复「运行选股」按钮可点（不再轮询、不计已用时） |
+    | 其他 HTTP 5xx / 网络抖动 | **不立即放弃**，连续失败 **3 次**才报错（避免单次抖动中断 7 分钟等待） |
+  - **客户端硬上限 15 分钟**（写死，非"或"）：到点停止轮询并提示「选股超时，请稍后重试」。因每次轮询请求都是秒级，CDN 100s 不再相关。
   - 组件卸载/再次点击时清理轮询定时器，避免泄漏与竞态。
 
 ### 3.4 数据流
@@ -138,11 +174,15 @@
   - 轮询 `GET /screen/jobs/{id}`：经历 running → completed，completed 带候选。
   - worker 抛异常 → job=failed 且带 error。
   - 未启用/非法市场/非法策略 → 提交端点返回对应错误码。
-  - LLM 环境注入：给定含 MiMo 渠道的 config，调用前 `LLM_API_KEY`/`LLM_BASE_URL` 被正确注入；已存在时不覆盖。
+  - **并发复用**：已有活跃 job 时再次 `POST /screen/jobs` → 返回**同一个 job_id**（不新建）。
+  - **未知 job_id** → `GET /screen/jobs/{id}` 返回 404。
+  - **轮询端点纯内存**：`GET /screen/jobs/{id}` 不触发适配层调用（断言 adapter mock 未被额外调用）。
+  - LLM 环境注入：给定含 MiMo 渠道的 config，`run_alphasift_screen` 执行**期间** `LLM_API_KEY`/`LLM_BASE_URL` 为 MiMo 值；执行**结束后还原**为调用前状态（原本无则被删除）。渠道无 api_keys 时跳过注入、不报错。
 
 **前端（`StockScreeningPage.test.tsx` / `alphasift.test.ts` 扩展）**
 - mock submit + 轮询：首轮 running、次轮 completed → 渲染候选。
 - 轮询期间显示进度文案；failed → 显示错误。
+- **轮询返回 404 → 停止轮询并展示"重新运行"提示**。
 
 **既有命令**（与集成文档一致）
 - `python -m pytest tests/test_alphasift_api.py -q`
@@ -153,12 +193,13 @@
 ## 5. 部署与验收
 
 1. 服务器先备份（沿用 `scripts/backup.sh` 或手动 tar `data/`）。
-2. `git pull` 到生产 → Docker 重建镜像（多阶段构建会编译前端）→ `docker compose up -d` 重建两容器。
-3. **真机实跑一次选股**（WebUI 或直调新端点）：确认
+2. **重建前确认** `docker/docker-compose.yml` 的两处本地改动仍在：`env_file: ../data/.env` 与 `environment: ENV_FILE=/app/data/.env`（见维护手册 CLAUDE.md 第三节），否则认证会失效、配置读取出错。
+3. `git pull` 到生产 → Docker 重建镜像（多阶段构建会编译前端）→ `docker compose -f docker/docker-compose.yml up -d` 重建两容器。
+4. **真机实跑一次选股**（WebUI 或直调新端点）：确认
    - 提交秒回、轮询正常推进、最终出候选；
-   - 结果中 `llm_ranked=true` 且候选带 LLM 字段（证明 MiMo 接上）；
-   - 过程中 `docker stats` 观察 `stock-server` 内存不 OOM（注意：现有同步版本本就在 server 容器跑选股，异步不新增内存风险，仅确认）。
-4. 失败则回滚镜像/分支。
+   - 结果中 `llm_ranked=true` 且候选带 LLM 字段（证明 MiMo 接上）。若 `llm_ranked=false`，查 job result 的 `llm_parse_errors`/`source_errors`（响应体已有字段）区分"MiMo 没接上"与"接上但本次无 LLM 结果"。
+   - 过程中 `docker stats` 观察 `stock-server` 内存：**RSS 峰值 < 400MB 视为通过**（注意：现有同步版本本就在 server 容器跑选股，异步不新增内存风险，仅量化确认不 OOM）。
+5. 失败则回滚镜像/分支。
 
 ## 6. ⚠️ 上游同步影响（必须登记）
 
