@@ -41,6 +41,29 @@ def test_rerank_parses_markdown_fenced_json(monkeypatch):
     assert res["llm_selection_logic"] == "偏好科技"
 
 
+def test_rerank_limits_llm_input_to_40(monkeypatch):
+    # 候选 50 只时，喂给 LLM 的 prompt 中候选行数须 ≤40（按 signal_score 降序取前 40）
+    cands = [
+        {"code": f"{600000 + i:06d}", "name": f"S{i}", "signal_score": i,
+         "signal_detail": "金叉", "close": 10, "change_pct": 0.01, "industry": "科技"}
+        for i in range(50)
+    ]
+    captured = {}
+
+    def fake_call(prompt):
+        captured["prompt"] = prompt
+        # 返回一个能命中候选的最高分股票，使其走 LLM 成功路径
+        return ('{"selection_logic":"x","portfolio_risk":"y","ranking":'
+                '[{"code":"600049","reason":"r","thesis":"t","risks":["r"],"style_fit":"f"}]}')
+
+    monkeypatch.setattr(ranker, "_call_llm", fake_call)
+    res = ranker.rerank(cands, strategy_desc="金叉", preference="", max_results=10)
+    # 候选区块在 prompt 末尾，统计 ` | 信号:` 出现次数即候选行数
+    candidate_rows = captured["prompt"].count(" | 信号:")
+    assert candidate_rows == 40
+    assert res["llm_ranked"] is True
+
+
 def test_rerank_parses_json_with_trailing_comma(monkeypatch):
     # 带 trailing comma 的非严格 JSON 须容错解析成功
     fake = (

@@ -16,6 +16,7 @@ _PROMPT = """你是A股选股助手。下面是经量化策略初筛出的候选
 请根据【策略】与【用户偏好】对候选排序并给出理由。规则：
 - 用户偏好与策略冲突时，在候选范围内**优先满足用户偏好**（可少选、宁缺毋滥）。
 - 只能从给定候选中选择，不得编造未列出的股票。
+- 只挑选你**最看好的、最多 {max_n} 只**，`ranking` 数组长度不得超过 {max_n}，不要输出全部候选。
 严格输出 JSON：{{"selection_logic":"一句话选股逻辑","portfolio_risk":"组合风险提示",
 "ranking":[{{"code":"代码","reason":"一句话理由","thesis":"简要逻辑","risks":["风险1"],"style_fit":"与偏好/风格的契合度"}}]}}
 
@@ -54,7 +55,7 @@ def _call_llm(prompt: str) -> str:
     if not model or not key:
         raise RuntimeError("未配置可用 LLM 渠道")
     kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}],
-              "max_tokens": 2048, "api_key": key, "timeout": 90}
+              "max_tokens": 4096, "api_key": key, "timeout": 90}
     if base_url:
         kwargs["api_base"] = base_url
     # 合并渠道自带 extra_headers；仅 aihubmix 渠道才补 APP-Code（MiMo 渠道 base_url 不含 aihubmix.com，不会误注入）
@@ -105,9 +106,13 @@ def rerank(candidates: List[dict], strategy_desc: str, preference: str, max_resu
     if not candidates:
         return {"candidates": [], "llm_ranked": False, "llm_selection_logic": "",
                 "llm_portfolio_risk": "", "warnings": ["候选为空"]}
+    # 候选已在 engine 截断到 ≤80，这里再按 signal_score 降序取前 40 只喂给 LLM 减负；
+    # 降级用的全集 candidates 与 by_code 映射保持不变（降级仍可用全部候选排序）。
+    llm_input = sorted(candidates, key=lambda c: c.get("signal_score", 0), reverse=True)[:40]
     prompt = _PROMPT.format(strategy=strategy_desc or "（未指定）",
                             preference=preference or "（无）",
-                            table=_build_table(candidates))
+                            table=_build_table(llm_input),
+                            max_n=max_results)
     try:
         text = _call_llm(prompt)
     except Exception as exc:  # noqa: BLE001
@@ -115,6 +120,7 @@ def rerank(candidates: List[dict], strategy_desc: str, preference: str, max_resu
         return _fallback(candidates, max_results, "LLM 重排不可用，已按量化打分排序")
     data = _parse_json(text)
     if not data or not isinstance(data.get("ranking"), list):
+        logger.warning("选股 LLM 重排解析失败，原始返回前500字: %s", text[:500])
         return _fallback(candidates, max_results, "LLM 返回无法解析，已按量化打分排序")
     by_code = {c["code"]: c for c in candidates}
     ordered = []
