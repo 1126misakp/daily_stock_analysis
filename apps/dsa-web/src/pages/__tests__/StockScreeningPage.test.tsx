@@ -2,12 +2,15 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import StockScreeningPage from '../StockScreeningPage';
 
-const { enableAlphaSift, getAlphaSiftStatus, getStrategies, screenStocks } = vi.hoisted(() => ({
-  enableAlphaSift: vi.fn(),
-  getAlphaSiftStatus: vi.fn(),
-  getStrategies: vi.fn(),
-  screenStocks: vi.fn(),
-}));
+const { enableAlphaSift, getAlphaSiftStatus, getStrategies, screenStocks, submitScreenJob, getScreenJob } =
+  vi.hoisted(() => ({
+    enableAlphaSift: vi.fn(),
+    getAlphaSiftStatus: vi.fn(),
+    getStrategies: vi.fn(),
+    screenStocks: vi.fn(),
+    submitScreenJob: vi.fn(),
+    getScreenJob: vi.fn(),
+  }));
 
 vi.mock('../../api/alphasift', () => ({
   alphasiftApi: {
@@ -15,6 +18,8 @@ vi.mock('../../api/alphasift', () => ({
     getStatus: (...args: unknown[]) => getAlphaSiftStatus(...args),
     getStrategies: (...args: unknown[]) => getStrategies(...args),
     screen: (...args: unknown[]) => screenStocks(...args),
+    submitScreenJob: (...args: unknown[]) => submitScreenJob(...args),
+    getScreenJob: (...args: unknown[]) => getScreenJob(...args),
   },
 }));
 
@@ -41,6 +46,8 @@ describe('StockScreeningPage', () => {
     getAlphaSiftStatus.mockReset();
     getStrategies.mockReset();
     screenStocks.mockReset();
+    submitScreenJob.mockReset();
+    getScreenJob.mockReset();
     getStrategies.mockResolvedValue(mockStrategiesResponse);
   });
 
@@ -77,7 +84,10 @@ describe('StockScreeningPage', () => {
       available: false,
       installSpecIsDefault: true,
     });
-    screenStocks.mockResolvedValue({
+    submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
+    getScreenJob.mockResolvedValue({
+      jobId: 'job1',
+      status: 'completed',
       enabled: true,
       candidates: [],
       candidateCount: 0,
@@ -93,7 +103,7 @@ describe('StockScreeningPage', () => {
     expect(screen.getByDisplayValue('custom_strategy_alpha')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
-    await waitFor(() => expect(screenStocks).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(submitScreenJob).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByText(/自定义策略 \(custom_strategy_alpha\)/)).toBeInTheDocument());
   });
 
@@ -114,7 +124,10 @@ describe('StockScreeningPage', () => {
       available: false,
       installSpecIsDefault: true,
     });
-    screenStocks.mockResolvedValue({
+    submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
+    getScreenJob.mockResolvedValue({
+      jobId: 'job1',
+      status: 'completed',
       enabled: true,
       candidates: [],
       candidateCount: 0,
@@ -138,8 +151,8 @@ describe('StockScreeningPage', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
-    await waitFor(() => expect(screenStocks).toHaveBeenCalledTimes(1));
-    expect(screenStocks).toHaveBeenCalledWith({
+    await waitFor(() => expect(submitScreenJob).toHaveBeenCalledTimes(1));
+    expect(submitScreenJob).toHaveBeenCalledWith({
       market: 'cn',
       strategy: 'shrink_pullback',
       maxResults: 3,
@@ -160,7 +173,10 @@ describe('StockScreeningPage', () => {
       available: true,
       installSpecIsDefault: true,
     });
-    screenStocks.mockResolvedValueOnce({
+    submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
+    getScreenJob.mockResolvedValue({
+      jobId: 'job1',
+      status: 'completed',
       enabled: true,
       candidates: [
         {
@@ -180,7 +196,7 @@ describe('StockScreeningPage', () => {
     expect(await screen.findByText('选股已开启')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
 
-    expect(await screen.findByText('旧策略股票')).toBeInTheDocument();
+    expect(await screen.findByText('旧策略股票', undefined, { timeout: 8000 })).toBeInTheDocument();
     expect(screen.getByText('选股完成')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /资金热度/ }));
@@ -188,5 +204,107 @@ describe('StockScreeningPage', () => {
     expect(screen.queryByText('旧策略股票')).not.toBeInTheDocument();
     expect(screen.getByText('等待运行')).toBeInTheDocument();
     expect(screen.getByText('当前策略：资金热度 · A 股')).toBeInTheDocument();
+  });
+
+  it('submits a job and renders candidates after polling completes', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
+    getScreenJob
+      .mockResolvedValueOnce({ jobId: 'job1', status: 'running', candidates: [] })
+      .mockResolvedValueOnce({
+        jobId: 'job1',
+        status: 'completed',
+        enabled: true,
+        candidateCount: 1,
+        candidates: [{ code: '600519', name: '贵州茅台', rank: 1, reason: '', raw: {} }],
+        llmRanked: true,
+      });
+
+    render(<StockScreeningPage />);
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+      // submit 完成后第一次轮询(running)
+      await vi.advanceTimersByTimeAsync(4000);
+      // 第二次轮询(completed)
+      await vi.advanceTimersByTimeAsync(4000);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(submitScreenJob).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText('贵州茅台')).toBeInTheDocument();
+    expect(screen.getByText('600519')).toBeInTheDocument();
+  });
+
+  it('neutralizes an in-flight poll continuation after unmount', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
+
+    // 用 deferred promise 控制轮询结果的解析时机：组件卸载后才解析
+    let resolveJob: (value: unknown) => void = () => {};
+    const pendingJob = new Promise((resolve) => {
+      resolveJob = resolve;
+    });
+    getScreenJob.mockReturnValue(pendingJob);
+
+    const { unmount } = render(<StockScreeningPage />);
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+
+    vi.useFakeTimers();
+    try {
+      // 启动一次运行：提交 job1，触发首次轮询（停在 pendingJob 上等待）
+      fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(getScreenJob).toHaveBeenCalledTimes(1);
+
+      // 卸载组件 —— 此时仍有一笔 getScreenJob 在飞行中无法取消
+      unmount();
+
+      // 解析这笔过期的轮询：running 状态会尝试再调度下一次轮询
+      resolveJob({ jobId: 'job1', status: 'running', candidates: [] });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // epoch 守卫应使过期续体成为 no-op：不得再调度下一次轮询
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(getScreenJob).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows a re-run hint when polling returns 404', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
+    getScreenJob.mockRejectedValue(
+      Object.assign(new Error('not found'), { response: { status: 404 } }),
+    );
+
+    render(<StockScreeningPage />);
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+      await vi.advanceTimersByTimeAsync(4000);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(await screen.findByText(/结果未保留|重新运行/)).toBeInTheDocument();
   });
 });

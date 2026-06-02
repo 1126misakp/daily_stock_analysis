@@ -1,5 +1,5 @@
 import type React from 'react';
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, CircleAlert, Play, PlusCircle, Search, SlidersHorizontal } from 'lucide-react';
 import {
   alphasiftApi,
@@ -7,6 +7,7 @@ import {
   type AlphaSiftScreenResponse,
   type AlphaSiftStrategy,
 } from '../api/alphasift';
+import { getParsedApiError } from '../api/error';
 import { AppPage, Button, InlineAlert } from '../components/common';
 
 const MARKETS = [{ id: 'cn', label: 'A 股' }];
@@ -83,6 +84,30 @@ const StockScreeningPage: React.FC = () => {
   const [loadingStrategies, setLoadingStrategies] = useState(false);
   const [error, setError] = useState('');
   const [strategyLoadError, setStrategyLoadError] = useState('');
+
+  const POLL_INTERVAL_MS = 4000;
+  const MAX_POLL_MS = 15 * 60 * 1000;
+  const MAX_TRANSIENT_ERRORS = 3;
+  const pollTimerRef = useRef<number | null>(null);
+  const pollStartRef = useRef<number>(0);
+  const transientErrorsRef = useRef<number>(0);
+  const runEpochRef = useRef(0);
+
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current != null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      // 卸载时 bump epoch，使任何在飞行中的轮询续体成为 no-op
+      runEpochRef.current += 1;
+      stopPolling();
+    },
+    [stopPolling],
+  );
 
   const selectedStrategy = useMemo(() => strategies.find((item) => item.id === strategy), [strategies, strategy]);
   const selectedStrategyTitle = selectedStrategy?.name || selectedStrategy?.title || '自定义策略';
@@ -179,19 +204,77 @@ const StockScreeningPage: React.FC = () => {
     setMaxResults(nextMaxResults);
   };
 
+  const pollJob = useCallback(async (jobId: string, epoch: number) => {
+    if (Date.now() - pollStartRef.current > MAX_POLL_MS) {
+      setError('选股超时，请稍后重试');
+      setLoading(false);
+      return;
+    }
+    try {
+      const job = await alphasiftApi.getScreenJob(jobId);
+      // 已被新一次运行（或卸载）取代的过期续体直接忽略，避免覆盖新状态/泄漏定时器
+      if (epoch !== runEpochRef.current) {
+        return;
+      }
+      transientErrorsRef.current = 0;
+      if (job.status === 'completed') {
+        setScreenMeta(job);
+        setCandidates(job.candidates ?? []);
+        setExpandedCode(job.candidates?.[0]?.code ?? null);
+        setLoading(false);
+        return;
+      }
+      if (job.status === 'failed') {
+        setCandidates([]);
+        setError(job.error || '选股失败');
+        setLoading(false);
+        return;
+      }
+      pollTimerRef.current = window.setTimeout(() => void pollJob(jobId, epoch), POLL_INTERVAL_MS);
+    } catch (err) {
+      // 过期续体的错误分支同样直接忽略
+      if (epoch !== runEpochRef.current) {
+        return;
+      }
+      const parsed = getParsedApiError(err);
+      if (parsed.status === 404) {
+        setCandidates([]);
+        setError('任务已结束或服务重启，结果未保留，请重新运行');
+        setLoading(false);
+        return;
+      }
+      transientErrorsRef.current += 1;
+      if (transientErrorsRef.current >= MAX_TRANSIENT_ERRORS) {
+        setError(err instanceof Error ? err.message : '选股失败');
+        setLoading(false);
+        return;
+      }
+      pollTimerRef.current = window.setTimeout(() => void pollJob(jobId, epoch), POLL_INTERVAL_MS);
+    }
+    // 仅依赖稳定的 ref/setter 与稳定的 alphasiftApi，无需补充其他依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleSubmit = async () => {
+    stopPolling();
+    const epoch = ++runEpochRef.current;
     setLoading(true);
     setError('');
     setScreenMeta(null);
+    transientErrorsRef.current = 0;
+    pollStartRef.current = Date.now();
     try {
-      const result = await alphasiftApi.screen({ market, strategy, maxResults });
-      setScreenMeta(result);
-      setCandidates(result.candidates);
-      setExpandedCode(result.candidates[0]?.code ?? null);
+      const submitted = await alphasiftApi.submitScreenJob({ market, strategy, maxResults });
+      if (epoch !== runEpochRef.current) {
+        return;
+      }
+      pollTimerRef.current = window.setTimeout(() => void pollJob(submitted.jobId, epoch), POLL_INTERVAL_MS);
     } catch (err) {
+      if (epoch !== runEpochRef.current) {
+        return;
+      }
       setCandidates([]);
       setError(err instanceof Error ? err.message : '选股失败');
-    } finally {
       setLoading(false);
     }
   };
@@ -328,7 +411,7 @@ const StockScreeningPage: React.FC = () => {
           <Button
             className="h-11 min-w-40"
             isLoading={loading}
-            loadingText="筛选中..."
+            loadingText="选股中(约几分钟)..."
             disabled={!enabled || loading}
             onClick={() => void handleSubmit()}
           >
@@ -383,6 +466,12 @@ const StockScreeningPage: React.FC = () => {
             {candidates.length} 条候选
           </div>
         </div>
+
+        {loading ? (
+          <p className="mb-4 text-sm text-secondary-text">
+            选股需扫描全市场，预计需几分钟，请勿关闭页面。
+          </p>
+        ) : null}
 
         {candidates.length === 0 ? (
           <div className="rounded-xl border border-dashed border-border bg-surface/70 px-5 py-10 text-center">
