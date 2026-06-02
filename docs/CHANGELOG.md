@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [改进] 策略回测页新增常驻「新手必看」说明卡片，解释回测含义、出结果的两个前提（记录天龄与评估窗口），并澄清「开始/结束日期」仅用于筛选已有结果、不触发回测。
+- [新功能] 自研选股引擎替换 AlphaSift：全市场量化足切 + LLM 轻量重排，支持 8 策略与用户偏好，选股入口常驻无需安装。
+- [改进] 选股端点改名为 /api/v1/screen/*，移除 AlphaSift 第三方依赖与安装/状态/启用相关 Web 设置。
 - [改进] AlphaSift 选股入口在 Web 侧边栏中移动到“问股”下方，贴近 Agent/研究辅助工作流。
 - [改进] Docker 镜像构建阶段预置默认 AlphaSift 适配层，与桌面发布包一样避免运行期额外安装。
 - [新功能] 新增默认关闭的 AlphaSift 选股页签，通过 `ALPHASIFT_ENABLED` 开启后经由稳定适配层读取策略并执行选股。
