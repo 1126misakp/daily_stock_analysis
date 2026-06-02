@@ -2,7 +2,6 @@ import type React from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { useAuth, useSystemConfig } from '../hooks';
 import { createParsedApiError, getParsedApiError, type ParsedApiError } from '../api/error';
-import { alphasiftApi, notifyAlphaSiftConfigChanged, notifySystemConfigChanged } from '../api/alphasift';
 import { systemConfigApi } from '../api/systemConfig';
 import { ApiErrorAlert, Button, ConfirmDialog, EmptyState } from '../components/common';
 import {
@@ -204,11 +203,8 @@ const SettingsPage: React.FC = () => {
   const { authEnabled, passwordChangeable } = useAuth();
   const [envBackupActionError, setEnvBackupActionError] = useState<ParsedApiError | null>(null);
   const [envBackupActionSuccess, setEnvBackupActionSuccess] = useState<string>('');
-  const [alphaSiftActionError, setAlphaSiftActionError] = useState<ParsedApiError | null>(null);
-  const [alphaSiftActionSuccess, setAlphaSiftActionSuccess] = useState<string>('');
   const [isExportingEnv, setIsExportingEnv] = useState(false);
   const [isImportingEnv, setIsImportingEnv] = useState(false);
-  const [isUpdatingAlphaSift, setIsUpdatingAlphaSift] = useState(false);
   const [showImportConfirm, setShowImportConfirm] = useState(false);
   const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState | null>(null);
   const [isCheckingDesktopUpdate, setIsCheckingDesktopUpdate] = useState(false);
@@ -246,7 +242,6 @@ const SettingsPage: React.FC = () => {
     save,
     resetDraft,
     setDraftValue,
-    getChangedItems,
     refreshAfterExternalSave,
     configVersion,
     maskToken,
@@ -316,8 +311,6 @@ const SettingsPage: React.FC = () => {
 
   const rawActiveItems = itemsByCategory[activeCategory] || [];
   const rawActiveItemMap = new Map(rawActiveItems.map((item) => [item.key, String(item.value ?? '')]));
-  const alphasiftItem = (itemsByCategory.data_source || []).find((item) => item.key === 'ALPHASIFT_ENABLED');
-  const alphasiftEnabled = String(alphasiftItem?.value ?? '').trim().toLowerCase() === 'true';
   const hasConfiguredChannels = Boolean((rawActiveItemMap.get('LLM_CHANNELS') || '').trim());
   const hasLitellmConfig = Boolean((rawActiveItemMap.get('LITELLM_CONFIG') || '').trim());
 
@@ -436,7 +429,6 @@ const SettingsPage: React.FC = () => {
         }));
         return;
       }
-      notifySystemConfigChanged();
       setEnvBackupActionSuccess('已导入 .env 备份并重新加载配置。');
     } catch (error: unknown) {
       setEnvBackupActionError(getParsedApiError(error));
@@ -470,63 +462,10 @@ const SettingsPage: React.FC = () => {
     }
   };
 
-  const updateAlphaSiftEnabled = async (nextEnabled: boolean) => {
-    setAlphaSiftActionError(null);
-    setAlphaSiftActionSuccess('');
-    setIsUpdatingAlphaSift(true);
-    try {
-      if (nextEnabled) {
-        await alphasiftApi.enable();
-        await refreshAfterExternalSave(['ALPHASIFT_ENABLED']);
-        setAlphaSiftActionSuccess('已开启 AlphaSift 选股。');
-        return;
-      }
-
-      await systemConfigApi.update({
-        configVersion,
-        maskToken,
-        reloadNow: true,
-        items: [{ key: 'ALPHASIFT_ENABLED', value: 'false' }],
-      });
-      notifyAlphaSiftConfigChanged();
-      await refreshAfterExternalSave(['ALPHASIFT_ENABLED']);
-      setAlphaSiftActionSuccess('已关闭 AlphaSift 选股。');
-    } catch (error: unknown) {
-      setAlphaSiftActionError(getParsedApiError(error));
-      await refreshAfterExternalSave(['ALPHASIFT_ENABLED']);
-    } finally {
-      setIsUpdatingAlphaSift(false);
-    }
-  };
-
   const handleSaveConfig = async () => {
-    const changedItems = getChangedItems();
-    const changedAlphaSiftItem = changedItems.find((item) => item.key === 'ALPHASIFT_ENABLED');
     const result = await save();
     if (!result.success) {
       return;
-    }
-    notifySystemConfigChanged();
-    if (!changedAlphaSiftItem) {
-      return;
-    }
-
-    setAlphaSiftActionError(null);
-    setAlphaSiftActionSuccess('');
-    try {
-      const isAlphaSiftEnabled = changedAlphaSiftItem.value.trim().toLowerCase() === 'true';
-      if (isAlphaSiftEnabled) {
-        await alphasiftApi.enable();
-        await refreshAfterExternalSave(['ALPHASIFT_ENABLED']);
-        setAlphaSiftActionSuccess('已开启 AlphaSift 选股。');
-        return;
-      }
-
-      notifyAlphaSiftConfigChanged();
-      setAlphaSiftActionSuccess('已关闭 AlphaSift 选股。');
-    } catch (error: unknown) {
-      setAlphaSiftActionError(getParsedApiError(error));
-      await refreshAfterExternalSave(['ALPHASIFT_ENABLED']);
     }
   };
 
@@ -666,55 +605,6 @@ const SettingsPage: React.FC = () => {
           </aside>
 
           <section className="space-y-4">
-            {alphasiftItem ? (
-              <SettingsSectionCard
-                title="AlphaSift 选股"
-                description="启用第三方项目 AlphaSift 提供的选股能力。"
-              >
-                <div className="flex flex-col gap-4 rounded-2xl border settings-border bg-background/35 px-4 py-4 md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <p className="text-sm font-semibold text-foreground">
-                      {alphasiftEnabled ? '选股已开启' : '选股未开启'}
-                    </p>
-                    <p className="mt-1 text-xs leading-6 text-muted-text">
-                      开启后左侧导航会显示“选股”，策略、数据处理和候选生成来自 AlphaSift，DSA 只负责调用与展示。
-                    </p>
-                    <p className="mt-2 text-xs leading-6 text-amber-700 dark:text-amber-300">
-                      风险提示：选股结果仅用于研究和辅助判断，不构成投资建议；市场有风险，交易决策和损益由使用者自行承担。
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="settings-secondary"
-                      onClick={() => setActiveCategory('data_source')}
-                    >
-                      查看配置项
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={alphasiftEnabled ? 'settings-secondary' : 'settings-primary'}
-                      onClick={() => void updateAlphaSiftEnabled(!alphasiftEnabled)}
-                      disabled={isSaving || isLoading || isUpdatingAlphaSift}
-                      isLoading={isUpdatingAlphaSift}
-                      loadingText={alphasiftEnabled ? '关闭中...' : '开启中...'}
-                    >
-                      {alphasiftEnabled ? '关闭选股' : '开启选股'}
-                    </Button>
-                  </div>
-                </div>
-                {alphaSiftActionError ? (
-                  <div className="mt-3">
-                    <ApiErrorAlert error={alphaSiftActionError} />
-                  </div>
-                ) : null}
-                {!alphaSiftActionError && alphaSiftActionSuccess ? (
-                  <div className="mt-3">
-                    <SettingsAlert title="操作成功" message={alphaSiftActionSuccess} variant="success" />
-                  </div>
-                ) : null}
-              </SettingsSectionCard>
-            ) : null}
             {activeCategory === 'system' ? <AuthSettingsCard /> : null}
             {activeCategory === 'system' ? (
               <SettingsSectionCard

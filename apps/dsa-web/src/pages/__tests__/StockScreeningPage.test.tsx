@@ -2,22 +2,15 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import StockScreeningPage from '../StockScreeningPage';
 
-const { enableAlphaSift, getAlphaSiftStatus, getStrategies, screenStocks, submitScreenJob, getScreenJob } =
-  vi.hoisted(() => ({
-    enableAlphaSift: vi.fn(),
-    getAlphaSiftStatus: vi.fn(),
-    getStrategies: vi.fn(),
-    screenStocks: vi.fn(),
-    submitScreenJob: vi.fn(),
-    getScreenJob: vi.fn(),
-  }));
+const { getStrategies, submitScreenJob, getScreenJob } = vi.hoisted(() => ({
+  getStrategies: vi.fn(),
+  submitScreenJob: vi.fn(),
+  getScreenJob: vi.fn(),
+}));
 
-vi.mock('../../api/alphasift', () => ({
-  alphasiftApi: {
-    enable: (...args: unknown[]) => enableAlphaSift(...args),
-    getStatus: (...args: unknown[]) => getAlphaSiftStatus(...args),
+vi.mock('../../api/screen', () => ({
+  screenApi: {
     getStrategies: (...args: unknown[]) => getStrategies(...args),
-    screen: (...args: unknown[]) => screenStocks(...args),
     submitScreenJob: (...args: unknown[]) => submitScreenJob(...args),
     getScreenJob: (...args: unknown[]) => getScreenJob(...args),
   },
@@ -27,63 +20,53 @@ const mockStrategiesResponse = {
   enabled: true,
   strategies: [
     {
-      id: 'dual_low',
-      name: 'Dual Low',
-      title: 'Dual Low',
-      description: 'Low valuation strategy',
-      category: 'value',
-      tag: 'value',
-      tags: ['value'],
-      marketScope: ['cn'],
+      id: 'ma_golden_cross',
+      name: '均线金叉',
+      description: '检测均线金叉配合量能确认信号',
+      category: 'trend',
+      tradingStyle: '趋势确认、稳健追涨',
+    },
+    {
+      id: 'bottom_volume',
+      name: '底部放量',
+      description: '深跌后放量收阳',
+      category: 'reversal',
+      tradingStyle: '抄底、左侧反转',
     },
   ],
-  strategyCount: 1,
+  strategyCount: 2,
 };
 
 describe('StockScreeningPage', () => {
   beforeEach(() => {
-    enableAlphaSift.mockReset();
-    getAlphaSiftStatus.mockReset();
     getStrategies.mockReset();
-    screenStocks.mockReset();
     submitScreenJob.mockReset();
     getScreenJob.mockReset();
     getStrategies.mockResolvedValue(mockStrategiesResponse);
   });
 
-  it('re-syncs enabled state when AlphaSift install fails after config is enabled', async () => {
-    getAlphaSiftStatus
-      .mockResolvedValueOnce({
-        enabled: false,
-        available: false,
-        installSpecIsDefault: true,
-      })
-      .mockResolvedValueOnce({
-        enabled: true,
-        available: false,
-        installSpecIsDefault: true,
-      });
-    enableAlphaSift.mockRejectedValueOnce(new Error('安装 AlphaSift 失败'));
-
+  it('renders strategy cards with trading style and no market selector', async () => {
     render(<StockScreeningPage />);
 
-    expect(await screen.findByText('选股未开启')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /运行选股/ })).toBeDisabled();
-
-    fireEvent.click(screen.getByRole('button', { name: '开启 AlphaSift' }));
-
-    await waitFor(() => expect(getAlphaSiftStatus).toHaveBeenCalledTimes(2));
-    expect(screen.getByText('选股已开启')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /运行选股/ })).not.toBeDisabled();
-    expect(screen.getByText('安装 AlphaSift 失败')).toBeInTheDocument();
+    expect(await screen.findByText('均线金叉')).toBeInTheDocument();
+    expect(screen.getByText('适合：趋势确认、稳健追涨')).toBeInTheDocument();
+    // 不再有市场下拉
+    expect(screen.queryByLabelText('市场')).not.toBeInTheDocument();
+    // 偏好输入框存在
+    expect(screen.getByPlaceholderText(/喜欢科技股/)).toBeInTheDocument();
   });
 
-  it('shows input strategy when strategy is not in preset list', async () => {
-    getAlphaSiftStatus.mockResolvedValueOnce({
-      enabled: true,
-      available: false,
-      installSpecIsDefault: true,
-    });
+  it('rejects submit when neither strategy nor preference is provided', async () => {
+    render(<StockScreeningPage />);
+    expect(await screen.findByText('均线金叉')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+
+    expect(await screen.findByText('策略和用户偏好至少填写一个')).toBeInTheDocument();
+    expect(submitScreenJob).not.toHaveBeenCalled();
+  });
+
+  it('submits with strategy and preference', async () => {
     submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
     getScreenJob.mockResolvedValue({
       jobId: 'job1',
@@ -94,124 +77,46 @@ describe('StockScreeningPage', () => {
     });
 
     render(<StockScreeningPage />);
+    expect(await screen.findByText('均线金叉')).toBeInTheDocument();
 
-    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('策略参数'), {
-      target: { value: 'custom_strategy_alpha' },
-    });
-
-    expect(screen.getByDisplayValue('custom_strategy_alpha')).toBeInTheDocument();
-
+    fireEvent.click(screen.getByRole('button', { name: /均线金叉/ }));
+    fireEvent.change(screen.getByPlaceholderText(/喜欢科技股/), { target: { value: '喜欢科技' } });
     fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
-    await waitFor(() => expect(submitScreenJob).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.getByText(/自定义策略 \(custom_strategy_alpha\)/)).toBeInTheDocument());
-  });
 
-  it('uses supported AlphaSift strategy ids and cn market', async () => {
-    getStrategies.mockResolvedValueOnce({
-      enabled: true,
-      strategies: [
-        { id: 'balanced_alpha', name: '平衡选股', description: 'desc', category: '框架' },
-        { id: 'capital_heat', name: '资金热度', description: 'desc', category: '动量' },
-        { id: 'dual_low', name: '双低', description: 'desc', category: '价值' },
-        { id: 'oversold_reversal', name: '超跌', description: 'desc', category: '反转' },
-        { id: 'shrink_pullback', name: '缩量回踩', description: 'desc', category: '趋势' },
-      ],
-      strategyCount: 5,
-    });
-    getAlphaSiftStatus.mockResolvedValueOnce({
-      enabled: true,
-      available: false,
-      installSpecIsDefault: true,
-    });
-    submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
-    getScreenJob.mockResolvedValue({
-      jobId: 'job1',
-      status: 'completed',
-      enabled: true,
-      candidates: [],
-      candidateCount: 0,
-    });
-
-    render(<StockScreeningPage />);
-
-    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
-
-    const marketSelect = screen.getByLabelText('市场') as HTMLSelectElement;
-    expect(Array.from(marketSelect.options).map((option) => option.value)).toEqual(['cn']);
-
-    [
-      ['平衡选股', 'balanced_alpha'],
-      ['资金热度', 'capital_heat'],
-      ['超跌', 'oversold_reversal'],
-      ['缩量回踩', 'shrink_pullback'],
-    ].forEach(([label, id]) => {
-      fireEvent.click(screen.getByRole('button', { name: new RegExp(label) }));
-      expect(screen.getByDisplayValue(id)).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
     await waitFor(() => expect(submitScreenJob).toHaveBeenCalledTimes(1));
     expect(submitScreenJob).toHaveBeenCalledWith({
-      market: 'cn',
-      strategy: 'shrink_pullback',
-      maxResults: 3,
+      strategy: 'ma_golden_cross',
+      preference: '喜欢科技',
+      maxResults: 20,
     });
   });
 
-  it('clears previous screening candidates when strategy changes', async () => {
-    getStrategies.mockResolvedValueOnce({
-      enabled: true,
-      strategies: [
-        { id: 'dual_low', name: '双低选股', description: 'desc', category: '价值' },
-        { id: 'capital_heat', name: '资金热度', description: 'desc', category: '动量' },
-      ],
-      strategyCount: 2,
-    });
-    getAlphaSiftStatus.mockResolvedValueOnce({
-      enabled: true,
-      available: true,
-      installSpecIsDefault: true,
-    });
+  it('clears previous candidates when strategy changes', async () => {
     submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
     getScreenJob.mockResolvedValue({
       jobId: 'job1',
       status: 'completed',
       enabled: true,
-      candidates: [
-        {
-          rank: 1,
-          code: '000001',
-          name: '旧策略股票',
-          score: 88.5,
-          reason: 'old result',
-          raw: {},
-        },
-      ],
+      candidates: [{ rank: 1, code: '000001', name: '旧策略股票', score: 88.5, reason: 'old result', raw: {} }],
       candidateCount: 1,
     });
 
     render(<StockScreeningPage />);
+    expect(await screen.findByText('均线金叉')).toBeInTheDocument();
 
-    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /均线金叉/ }));
     fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
 
     expect(await screen.findByText('旧策略股票', undefined, { timeout: 8000 })).toBeInTheDocument();
     expect(screen.getByText('选股完成')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /资金热度/ }));
+    fireEvent.click(screen.getByRole('button', { name: /底部放量/ }));
 
     expect(screen.queryByText('旧策略股票')).not.toBeInTheDocument();
     expect(screen.getByText('等待运行')).toBeInTheDocument();
-    expect(screen.getByText('当前策略：资金热度 · A 股')).toBeInTheDocument();
   });
 
   it('submits a job and renders candidates after polling completes', async () => {
-    getAlphaSiftStatus.mockResolvedValueOnce({
-      enabled: true,
-      available: true,
-      installSpecIsDefault: true,
-    });
     submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
     getScreenJob
       .mockResolvedValueOnce({ jobId: 'job1', status: 'running', candidates: [] })
@@ -225,7 +130,9 @@ describe('StockScreeningPage', () => {
       });
 
     render(<StockScreeningPage />);
-    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    expect(await screen.findByText('均线金叉')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /均线金叉/ }));
 
     vi.useFakeTimers();
     try {
@@ -244,11 +151,6 @@ describe('StockScreeningPage', () => {
   });
 
   it('neutralizes an in-flight poll continuation after unmount', async () => {
-    getAlphaSiftStatus.mockResolvedValueOnce({
-      enabled: true,
-      available: true,
-      installSpecIsDefault: true,
-    });
     submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
 
     // 用 deferred promise 控制轮询结果的解析时机：组件卸载后才解析
@@ -259,7 +161,9 @@ describe('StockScreeningPage', () => {
     getScreenJob.mockReturnValue(pendingJob);
 
     const { unmount } = render(<StockScreeningPage />);
-    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    expect(await screen.findByText('均线金叉')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /均线金叉/ }));
 
     vi.useFakeTimers();
     try {
@@ -284,18 +188,15 @@ describe('StockScreeningPage', () => {
   });
 
   it('shows a re-run hint when polling returns 404', async () => {
-    getAlphaSiftStatus.mockResolvedValueOnce({
-      enabled: true,
-      available: true,
-      installSpecIsDefault: true,
-    });
     submitScreenJob.mockResolvedValue({ jobId: 'job1', status: 'pending' });
     getScreenJob.mockRejectedValue(
       Object.assign(new Error('not found'), { response: { status: 404 } }),
     );
 
     render(<StockScreeningPage />);
-    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    expect(await screen.findByText('均线金叉')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /均线金叉/ }));
 
     vi.useFakeTimers();
     try {

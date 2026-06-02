@@ -1,8 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { BarChart3, Bell, BriefcaseBusiness, Home, LogOut, MessageSquareQuote, Search, Settings2 } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
-import { ALPHASIFT_CONFIG_CHANGED_EVENT, SYSTEM_CONFIG_CHANGED_EVENT, alphasiftApi } from '../../api/alphasift';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAgentChatStore } from '../../stores/agentChatStore';
 import { cn } from '../../utils/cn';
@@ -38,36 +37,9 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
   const { authEnabled, logout } = useAuth();
   const completionBadge = useAgentChatStore((state) => state.completionBadge);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
-  const [showAlphaSiftNav, setShowAlphaSiftNav] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-
-    const refreshAlphaSiftStatus = async () => {
-      try {
-        const status = await alphasiftApi.getStatus();
-        if (active) {
-          setShowAlphaSiftNav(status.enabled);
-        }
-      } catch {
-        if (active) {
-          setShowAlphaSiftNav(false);
-        }
-      }
-    };
-
-    void refreshAlphaSiftStatus();
-    window.addEventListener(ALPHASIFT_CONFIG_CHANGED_EVENT, refreshAlphaSiftStatus);
-    window.addEventListener(SYSTEM_CONFIG_CHANGED_EVENT, refreshAlphaSiftStatus);
-
-    return () => {
-      active = false;
-      window.removeEventListener(ALPHASIFT_CONFIG_CHANGED_EVENT, refreshAlphaSiftStatus);
-      window.removeEventListener(SYSTEM_CONFIG_CHANGED_EVENT, refreshAlphaSiftStatus);
-    };
-  }, []);
-
-  const navItems = showAlphaSiftNav ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.key !== 'screening');
+  // 自研选股无需安装、无外部依赖，选股入口常驻显示
+  const navItems = NAV_ITEMS;
 
   return (
     <div className="flex h-full flex-col">
