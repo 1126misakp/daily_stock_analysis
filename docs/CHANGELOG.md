@@ -93,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] 优化 Web 报告详情页信息层级，将输入数据块和运行诊断下移为主体内容后的折叠辅助信息。
 - [新功能] 市场阶段低敏摘要接入历史详情、同步分析响应和 completed 任务状态的 report metadata。
 - [改进] 盘中分析补齐实时行情获取时间、provider 时间、stale、fallback 与 partial/estimated 标记，供 AnalysisContextPack 映射输入数据限制。
+- [新功能] AlphaSift 选股改为异步任务（提交 /api/v1/alphasift/screen/jobs → 轮询），避免全市场扫描耗时超过前置 CDN 100s 上限导致的超时报错。
+- [改进] AlphaSift 选股的 LLM 重排接入项目主 LLM 渠道（运行时注入 LLM_API_KEY/LLM_BASE_URL），原同步 /api/v1/alphasift/screen 端点保留且一并生效。
 
 ## [3.19.0] - 2026-05-29
 
