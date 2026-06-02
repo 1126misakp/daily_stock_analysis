@@ -68,13 +68,26 @@ def _call_llm(prompt: str) -> str:
 
 
 def _parse_json(text: str) -> Optional[dict]:
-    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not text:
+        return None
+    s = text.strip()
+    # 1) 剥离 markdown 代码围栏：```json ... ``` 或 ``` ... ```
+    fence = re.search(r"```(?:json)?\s*(.*?)\s*```", s, re.DOTALL | re.IGNORECASE)
+    if fence:
+        s = fence.group(1).strip()
+    # 2) 提取首个完整 {...}（容忍前后多余文本）
+    m = re.search(r"\{.*\}", s, re.DOTALL)
     if not m:
         return None
+    body = m.group(0)
     try:
-        return json.loads(m.group(0))
+        return json.loads(body)
     except json.JSONDecodeError:
-        return None
+        # 3) 对常见 trailing comma 容错后再试一次
+        try:
+            return json.loads(re.sub(r",\s*([}\]])", r"\1", body))
+        except json.JSONDecodeError:
+            return None
 
 
 def _build_table(candidates: List[dict]) -> str:
