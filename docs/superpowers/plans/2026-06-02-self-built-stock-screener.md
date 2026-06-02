@@ -61,7 +61,9 @@ class MarketPanel:
 ```
 
 `latest` 表列（最新交易日 T，所有股票一行）：
-`code, name, close, open_, high, low, vol, amount, ma5, ma10, ma20, ma5_prev, ma10_prev, vol_ma5, vol_ratio, high_20, low_30, ret_from_high20, bias_ma5, pe, pb, total_mv, turnover_rate, industry`
+`code, name, close, open_, high, low, vol, amount, change_pct, ma5, ma10, ma20, ma5_prev, ma10_prev, vol_ma5, vol_ratio, high_20, low_30, ret_from_high20, bias_ma5, pe, pb, total_mv, turnover_rate, industry`
+
+> **实测要点（2026-06-02 生产 token 验证）**：Tushare `daily` 按 `trade_date` 一次返回**全市场 5507 行**（不截断），列含 `pct_chg`（百分比涨跌幅，如 1.5 表示 +1.5%）和 `pre_close`，因此 `change_pct` 直接取自 daily 的 `pct_chg/100`，**无需自算 prev_close**。`daily_basic` 同 5507 行含 `pe/pb/total_mv(万元)/turnover_rate/volume_ratio`。60 天串行取数 ≈76s（异步 job 可接受，47 次/分钟 < 80 限频上限，不触发整分钟 sleep）。
 
 ### scorer 输出（每个策略统一）
 `pd.DataFrame`，列：`code, name, signal_score(float), signal_detail(str)`，只含命中该策略的股票。
@@ -81,8 +83,20 @@ class MarketPanel:
   "warnings": [str], "source_errors": [str],
 }
 ```
-candidate dict 字段（对齐前端 `AlphaSiftCandidate`，camelCase 由前端 `toCamelCase` 转换）：
+candidate dict 字段（后端 snake_case，前端 `ScreenCandidate`(Task 10) 经 `toCamelCase` 转换）：
 `rank, code, name, score, screen_score(=signal_score), reason, llm_thesis, llm_risks, llm_style_fit, price, change_pct, amount, industry, raw`
+
+---
+
+## 全局执行约定（每个 Task 都适用，吸收自 prd-reviewer）
+
+- **测试离线纪律**：所有 `tests/test_screen_*.py` 禁止真实联网。凡会触发 `fetch_market_panel`/`run_screen` 的用例必须 monkeypatch 到桩。`test_screen_api.py` 因端点用 `from src.services.stock_screener import run_screen`，须 patch **端点模块属性** `ep.run_screen`（不是 engine 模块）。
+- **单例重置**：每个用到 `ScreenJobStore` 的用例开头 `ScreenJobStore._instance = None`（单例跨用例串扰 + 幂等复用进行中 job 会让第二个用例复用第一个的 job）。
+- **字段唯一真源**：`latest` 表列清单（含 `change_pct`）以"数据契约"段为准；任何 scorer/engine/ranker 引用的列必须先确认 `build_panel_from_frames` 已计算，否则补计算。
+- **路由 prefix 约定**：端点文件内 `APIRouter()` 不写 prefix，prefix 一律在 `api/v1/router.py` 的 `include_router(..., prefix="/screen")` 处给（与现有所有端点一致）。
+- **端点范式**：新端点用 `async def`（FastAPI 原生），测试用 `asyncio.run(ep.func(...))` 直接调用协程，不用 TestClient。注意与现有 `test_alphasift_api.py`（同步端点、同步调用）范式不同，这是**有意为之**。
+- **AlphaSift 残留删除顺序**：先改所有 import 引用（后端 `endpoints/__init__.py`/`router.py`、前端各文件与测试 mock），**最后**再删源文件，避免中途 import 崩溃导致 ci_gate/build 红。
+- **卡壳即停**：若真实 Tushare 接口行为（积分/行数/限频）与计划假设不符，停下来在交付说明里报告，不要自行降级 N 或改数据源（数据源铁律）。
 
 ---
 
@@ -103,10 +117,12 @@ import pandas as pd
 from src.services.stock_screener.market_data import build_panel_from_frames
 
 def _daily(code, dates, closes, vols):
+    pre = [closes[0]] + closes[:-1]
     return pd.DataFrame({
         "ts_code": code, "trade_date": dates,
         "open": closes, "high": [c * 1.01 for c in closes],
         "low": [c * 0.99 for c in closes], "close": closes,
+        "pre_close": pre, "pct_chg": [(c / p - 1) * 100 for c, p in zip(closes, pre)],
         "vol": vols, "amount": [c * v for c, v in zip(closes, vols)],
     })
 
@@ -125,6 +141,7 @@ def test_build_panel_computes_features():
     assert row["close"] == 11.0
     assert round(row["ma5"], 2) == round((10.6+10.7+10.8+11.0+10.5)/5, 2)
     assert row["vol_ratio"] > 2.5         # 当日 3000 / 5日均量
+    assert round(row["change_pct"], 4) == round(11.0 / 10.8 - 1, 4)  # 用 pct_chg
     assert panel.names["000001"] == "平安银行"
 ```
 
@@ -192,11 +209,19 @@ def build_panel_from_frames(daily, basic, names, industry, trade_date) -> Market
         vol_ratio = float(last["vol"]) / vol_ma5 if vol_ma5 else 0.0
         high_20 = g["high"].tail(20).astype(float).max()
         low_30 = g["low"].tail(30).astype(float).min()
+        # change_pct：优先用 Tushare daily 自带 pct_chg（百分比→小数），否则用收盘价回推
+        if "pct_chg" in g.columns and pd.notna(last.get("pct_chg")):
+            change_pct = float(last["pct_chg"]) / 100.0
+        elif len(closes) >= 2:
+            change_pct = float(closes.iloc[-1]) / float(closes.iloc[-2]) - 1.0
+        else:
+            change_pct = 0.0
         rows.append({
             "code": code, "name": names.get(code, code),
             "close": float(last["close"]), "open_": float(last["open"]),
             "high": float(last["high"]), "low": float(last["low"]),
             "vol": float(last["vol"]), "amount": float(last["amount"]),
+            "change_pct": change_pct,
             "ma5": ma5, "ma10": ma10, "ma20": ma20,
             "ma5_prev": ma5_prev, "ma10_prev": ma10_prev,
             "vol_ma5": vol_ma5, "vol_ratio": vol_ratio,
@@ -294,9 +319,12 @@ def fetch_market_panel(n_days: int = 60, end_date: Optional[str] = None) -> Mark
     if not dates:
         raise RuntimeError("无可用交易日")
     frames = []
+    EXPECTED_MIN_ROWS = 4000   # A股全市场实测约 5507 行，明显偏少视为截断/限权
     for d in dates:
         df = tushare._fundamental_df("daily", trade_date=d)
         if df is not None and not df.empty:
+            if len(df) < EXPECTED_MIN_ROWS:
+                logger.warning("[选股取数] %s daily 仅 %d 行，疑似被截断或积分受限", d, len(df))
             frames.append(df)
     if not frames:
         raise RuntimeError("Tushare daily 全市场取数为空")
@@ -553,7 +581,7 @@ def box_oscillation(panel: MarketPanel) -> pd.DataFrame:
     for code, g in panel.history.items():
         if len(g) < 30:
             continue
-        win = g.tail(120)
+        win = g.tail(60)   # 与 SNAPSHOT_DAYS=60 对齐；箱体看约 60 个交易日(~3个月)
         top = float(win["high"].max())
         bottom = float(win["low"].min())
         if bottom <= 0:
@@ -740,28 +768,33 @@ def _fallback(candidates: List[dict], max_results: int, warning: str) -> dict:
             "llm_portfolio_risk": "", "warnings": [warning]}
 
 
-def _resolve_model_and_key(cfg):
-    model = (cfg.litellm_model or "").strip()
+def _resolve_channel(cfg):
+    """model 与 key/base_url/headers 取自**同一个**被选中的渠道，避免多渠道下错配。"""
     channel = next((c for c in (cfg.llm_channels or []) if c.get("api_keys")), None)
-    if not model and channel and channel.get("models"):
-        model = channel["models"][0]
-    key = random.choice(channel["api_keys"]) if channel and channel.get("api_keys") else None
-    base_url = channel.get("base_url") if channel else None
-    return model, key, base_url
+    if not channel:
+        return None, None, None, None
+    models = channel.get("models") or []
+    model = models[0] if models else (cfg.litellm_model or "").strip()
+    key = random.choice(channel["api_keys"]) if channel.get("api_keys") else None
+    return model, key, channel.get("base_url"), channel.get("extra_headers")
 
 
 def _call_llm(prompt: str) -> str:
     import litellm
     cfg = get_config()
-    model, key, base_url = _resolve_model_and_key(cfg)
+    model, key, base_url, extra_headers = _resolve_channel(cfg)
     if not model or not key:
         raise RuntimeError("未配置可用 LLM 渠道")
     kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}],
               "max_tokens": 2048, "api_key": key, "timeout": 90}
     if base_url:
         kwargs["api_base"] = base_url
-        if "aihubmix.com" in base_url:
-            kwargs["extra_headers"] = {"APP-Code": "GPIJ3886"}
+    # 合并渠道自带 extra_headers；仅 aihubmix 渠道才补 APP-Code（MiMo 渠道 base_url 不含 aihubmix.com，不会误注入）
+    headers = dict(extra_headers or {})
+    if base_url and "aihubmix.com" in base_url:
+        headers.setdefault("APP-Code", "GPIJ3886")
+    if headers:
+        kwargs["extra_headers"] = headers
     resp = litellm.completion(**kwargs)
     return resp.choices[0].message.content or ""
 
@@ -888,14 +921,15 @@ def test_strategy_only_runs(monkeypatch):
     assert res["after_filter_count"] == 1
     assert res["candidates"][0]["code"] == "000001"
 
-def test_strategy_plus_preference_board_filter(monkeypatch):
+def test_strategy_plus_preference_does_not_hard_filter(monkeypatch):
     monkeypatch.setattr(engine, "fetch_market_panel", lambda **k: _panel())
     monkeypatch.setattr(engine, "_extract_boards", lambda pref, industries: ["银行"])
     monkeypatch.setattr(engine, "rerank", lambda cands, **k: {"candidates":cands,"llm_ranked":True,
         "llm_selection_logic":"","llm_portfolio_risk":"","warnings":[]})
-    # 金叉命中 000001(半导体)，但偏好限定银行 → 候选被过滤空
+    # 金叉命中 000001(半导体)，偏好限定银行：第1段不硬过滤，候选保留交 LLM 优先满足偏好
     res = engine.run_screen(strategy="ma_golden_cross", preference="只看银行", max_results=20)
-    assert res["after_filter_count"] == 0
+    assert res["after_filter_count"] == 1
+    assert any("偏好" in w for w in res["warnings"])
 ```
 
 - [ ] **Step 2: 跑测试确认失败** — 预期 ImportError。
@@ -985,8 +1019,10 @@ def run_screen(strategy: Optional[str], preference: Optional[str],
         hit = scorer(panel)
         cands = [_to_candidate(panel, r["code"], r["signal_score"], r["signal_detail"])
                  for _, r in hit.iterrows()]
-        if boards:
-            cands = [c for c in cands if c["industry"] in boards]
+        # 策略+偏好：板块/风格不在第1段硬过滤（策略已决定候选来源），整体偏好交第2段 LLM
+        # 优先满足，避免"策略命中行业与偏好板块不相交"时无故把候选清空。
+        if preference and boards:
+            warnings.append(f"已识别偏好板块 {boards}，将在 LLM 重排阶段优先满足你的偏好")
         cands.sort(key=lambda c: c["signal_score"], reverse=True)
         cands = cands[:STRATEGY_POOL_CAP]
     else:
@@ -1106,8 +1142,29 @@ git commit -m "feat: generalize async screen job store (strategy + preference)"
 ```python
 # tests/test_screen_api.py
 import asyncio
+import time
 import pytest
 from api.v1.endpoints import screen as ep
+from src.services.screen_jobs import ScreenJobStore
+
+@pytest.fixture(autouse=True)
+def _reset_store_and_stub(monkeypatch):
+    # 单例跨用例串扰 + 幂等复用进行中 job → 每个用例必须重置
+    ScreenJobStore._instance = None
+    # 端点用 `from src.services.stock_screener import run_screen`，故 patch 端点模块属性
+    monkeypatch.setattr(ep, "run_screen",
+                        lambda **k: {"enabled": True, "candidates": [], "candidateCount": 0})
+    yield
+    ScreenJobStore._instance = None
+
+def _wait(job_id):
+    store = ScreenJobStore.get_instance()
+    for _ in range(100):
+        j = store.get(job_id)
+        if j and j.status in ("completed", "failed"):
+            return j
+        time.sleep(0.02)
+    return store.get(job_id)
 
 def test_strategies_lists_eight():
     res = asyncio.run(ep.list_strategies())
@@ -1120,14 +1177,16 @@ def test_submit_requires_strategy_or_preference():
     with pytest.raises(Exception):
         asyncio.run(ep.submit_screen_job(ep.ScreenJobRequest(strategy="", preference="", max_results=20)))
 
-def test_submit_returns_job_id(monkeypatch):
+def test_submit_returns_job_id():
     req = ep.ScreenJobRequest(strategy="ma_golden_cross", preference="", max_results=5)
     res = asyncio.run(ep.submit_screen_job(req))
-    assert "jobId" in res or "job_id" in res
+    jid = res.get("jobId") or res.get("job_id")
+    assert jid
+    done = _wait(jid)               # 等后台 job 落定（已 stub run_screen，不联网）
+    assert done.status == "completed"
 
-def test_get_job_pure_memory(monkeypatch):
-    # 不存在的 job 返回 404
-    with pytest.raises(Exception):
+def test_get_job_pure_memory():
+    with pytest.raises(Exception):  # 不存在的 job 返回 404
         asyncio.run(ep.get_screen_job("nonexistent"))
 ```
 
@@ -1150,7 +1209,8 @@ from src.services.screen_jobs import ScreenJobStore
 from src.services.stock_screener import run_screen, ScreenInputError
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/screen", tags=["screen"])
+# prefix 不在此写：与现有所有端点一致，由 api/v1/router.py 的 include_router(prefix="/screen") 提供
+router = APIRouter(tags=["screen"])
 
 _ONLINE_STRATEGIES = [
     "ma_golden_cross", "volume_breakout", "bottom_volume", "shrink_pullback",
@@ -1208,12 +1268,13 @@ async def get_screen_job(job_id: str):
     return payload
 ```
 
-- [ ] **Step 4: 注册路由** — 在原 alphasift 路由注册文件中，移除 alphasift router，加入：
-```python
-from api.v1.endpoints import screen as screen_endpoint
-api_router.include_router(screen_endpoint.router)
-```
-（实现者用 `grep -rn "alphasift" api/v1/` 定位注册处。）
+- [ ] **Step 4: 注册路由（共两处，缺一会 import 崩）** — 先 `grep -rn "alphasift" api/v1/` 定位，真实代码有两处引用：
+  1. `api/v1/router.py`：import 行去掉 `alphasift`、加 `screen`；删 alphasift 的 `include_router`，新增（**register 处带 prefix，screen.py 内不带**）：
+     ```python
+     router.include_router(screen.router, prefix="/screen")
+     ```
+  2. `api/v1/endpoints/__init__.py`：把 `from . import alphasift` 与 `__all__` 中的 `alphasift` 改为 `screen`。
+  > ⚠️ 若只改 router.py 而漏 `__init__.py`，待 Task 12 删除 `alphasift.py` 后整个 `api.v1.endpoints` 包 import 即崩、ci_gate 直接红。
 
 - [ ] **Step 5: 跑测试确认通过** — `python -m pytest tests/test_screen_api.py -v`，预期 PASS（注意：`submit` 测试会真正异步触发 `run_screen`，可对 `engine.fetch_market_panel` monkeypatch 避免真实网络）。
 
@@ -1226,6 +1287,35 @@ git commit -m "feat: add /screen API endpoints (strategies, async jobs)"
 ---
 
 ## Phase 7：前端
+
+> **⚠️ 前端 AlphaSift 耦合面远不止 StockScreeningPage（prd-reviewer 实测命中 ~10 个文件）。删除一个被多处 import/mock 的模块，必须先全量盘点。**
+>
+> **产品决策（已拍板）：**
+> - **选股入口常驻显示**：原来选股菜单受 `alphasiftApi.getStatus().enabled` 门控。自研选股无需安装、无外部依赖 → 选股入口**常驻**，移除 status 门控与相关 CONFIG_CHANGED 事件。
+> - **SettingsPage 的 AlphaSift 设置整块移除**（启用开关/安装 UI/状态）——自研选股无配置开关。
+> - **市场选择**：后端固定 `cn`，前端移除 `MARKETS` 下拉与 `market` state。
+
+### Task 10.0: 前端 AlphaSift 影响面盘点（先于任何前端改动）
+
+**Files:** 只读盘点
+
+- [ ] **Step 1: 全量定位**
+```bash
+cd apps/dsa-web && grep -rln "alphasift\|AlphaSift\|ALPHASIFT" src/
+```
+预期命中并需处理（实现者以实际 grep 为准）：
+| 文件 | 处理 |
+|------|------|
+| `src/api/alphasift.ts` | → 改名 `screen.ts`（Task 10） |
+| `src/pages/StockScreeningPage.tsx` | 改造（Task 11） |
+| `src/components/layout/SidebarNav.tsx` | 移除选股菜单的 alphasift status 门控，改常驻；删 `getStatus`/CONFIG_CHANGED 监听 |
+| `src/pages/SettingsPage.tsx` + `src/locales/settingsHelp.ts` | 移除 AlphaSift 启用/安装设置项与文案 |
+| `src/api/error.ts` | 移除 `alphasift_install_*` 错误码分支 |
+| `src/api/__tests__/alphasift.test.ts` | 删除或改写为 `screen.test.ts` |
+| `src/pages/__tests__/StockScreeningPage.test.tsx` | 改：删"市场下拉只含 cn"/`market:'cn'` 入参断言，改用新字段 |
+| `src/pages/__tests__/SettingsPage.test.tsx` | 删 AlphaSift 设置项断言 |
+| `src/components/layout/__tests__/SidebarNav.test.tsx` | 改：选股菜单常驻断言 |
+- [ ] **Step 2: 逐文件列出改动清单**（写到 commit message 或临时笔记），确保后续 Task 10/11/12 不遗漏；删源文件前先改完所有 import 引用（删除顺序见全局约定）。
 
 ### Task 10: `screen.ts` API 层
 
@@ -1292,6 +1382,8 @@ git commit -m "feat: add screen API client (web)"
 
 - [ ] **Step 1: 改 import 与类型** — 把 `from '../api/alphasift'` 改为 `from '../api/screen'`，类型 `AlphaSiftStrategy`→`ScreenStrategy`、`AlphaSiftCandidate`→`ScreenCandidate`、`AlphaSiftScreenResponse`→`ScreenResponse`，`alphasiftApi`→`screenApi`。`getCandidateReason` 里 "AlphaSift 返回候选..." 文案改为"选股返回候选，但没有给出文字摘要..."。
 
+- [ ] **Step 1b: 候选卡片字段对齐（关键，否则 build 报 TS 错或恒空）** — 新 `ScreenCandidate` **不再有** `llmScore/riskLevel/riskFlags/llmCatalysts/factorScores` 等 AlphaSift 专属字段。移除结果表对这些字段的渲染（`StockScreeningPage.tsx` 约第 68/512/515/553/588 行），改用新字段：`score`(=signal_score)、`reason`、`llmThesis`、`llmRisks`、`llmStyleFit`、`changePct`、`amount`、`industry`。`formatScore`/`getFactorEntries` 等辅助函数入参类型同步改为 `ScreenCandidate`，删掉只服务于已移除字段的辅助函数。新增展示 `llmStyleFit`（与偏好/风格契合度）。
+
 - [ ] **Step 2: 新增偏好 state 与输入框** — 在 `strategy` state 旁加：
 ```typescript
 const [preference, setPreference] = useState('');
@@ -1330,16 +1422,24 @@ if (!strategy && !preference.trim()) {
 
 - [ ] **Step 5: 结果区展示偏好与选股逻辑** — 结果摘要处，若 `result.preference` 非空则展示"按偏好：{preference}"，`llmSelectionLogic` 展示为选股逻辑说明（页面已有 llm 字段渲染，沿用）。
 
-- [ ] **Step 6: 前端 build 验证**
-```bash
-cd apps/dsa-web && npm ci && npm run lint && npm run build
-```
-预期：lint 与 build 均通过，无 TypeScript 报错。
+- [ ] **Step 6: 移除市场下拉** — `StockScreeningPage.tsx` 删 `MARKETS` 常量（第 13 行）、`market` state（第 75 行）及市场选择 UI（第 379-382/439 行附近）；提交参数不再带 `market`（后端默认 cn）。
 
-- [ ] **Step 7: commit**
+- [ ] **Step 7: 关联前端文件改动**（按 Task 10.0 盘点）—
+  - `SidebarNav.tsx`：移除选股菜单的 `showAlphaSiftNav`/`getStatus` 门控与 `ALPHASIFT_CONFIG_CHANGED_EVENT`/`SYSTEM_CONFIG_CHANGED_EVENT` 监听，选股入口改常驻；
+  - `SettingsPage.tsx` + `settingsHelp.ts`：移除 AlphaSift 启用/安装设置项与文案；
+  - `api/error.ts`：移除 `alphasift_install_*` 错误码分支；
+  - 对应测试文件（`StockScreeningPage.test.tsx`/`SettingsPage.test.tsx`/`SidebarNav.test.tsx`/`alphasift.test.ts`）同步更新（删市场/AlphaSift 断言、改常驻断言、改写或删 alphasift.test）。
+
+- [ ] **Step 8: 前端全量验证**
 ```bash
-git add apps/dsa-web/src/pages/StockScreeningPage.tsx
-git commit -m "feat: add preference input and trading-style on screening page"
+cd apps/dsa-web && npm ci && npm run lint && npm run build && npm run test
+```
+预期：lint / build / vitest 均通过（vitest 必跑——本改动删除了被多个 test mock 的 alphasift 模块，仅 lint+build 漏不掉的回归靠它兜住）。
+
+- [ ] **Step 9: commit**
+```bash
+git add apps/dsa-web/src/
+git commit -m "feat: add preference input and trading-style; align screening UI to new API"
 ```
 
 ---
