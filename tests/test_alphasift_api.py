@@ -460,6 +460,92 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 400)
         self.assertEqual(caught.exception.detail["error"], "alphasift_screen_rejected")
 
+    def _reset_job_store(self):
+        from src.services.alphasift_screen_jobs import AlphaSiftScreenJobStore
+        AlphaSiftScreenJobStore._instance = None
+
+    def _wait_job(self, job_id, target=("completed", "failed"), timeout=5.0):
+        import time as _t
+        deadline = _t.time() + timeout
+        while _t.time() < deadline:
+            payload = alphasift_endpoint.alphasift_get_screen_job(job_id=job_id)
+            if payload["status"] in target:
+                return payload
+            _t.sleep(0.01)
+        raise AssertionError("job did not finish in time")
+
+    def test_submit_job_then_poll_completed(self) -> None:
+        self._reset_job_store()
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            screen=MagicMock(return_value={"candidates": [{"code": "600519", "name": "MT"}]}),
+        )
+        with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+            submitted = alphasift_endpoint.alphasift_submit_screen_job(
+                alphasift_endpoint.AlphaSiftScreenRequest(market="cn", strategy="dual_low", max_results=3),
+                config=config,
+            )
+            self.assertEqual(submitted["status"], "pending")
+            self.assertIn("job_id", submitted)
+            done = self._wait_job(submitted["job_id"])
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(done["candidate_count"], 1)
+        self.assertEqual(done["candidates"][0]["code"], "600519")
+
+    def test_submit_job_reuses_active(self) -> None:
+        self._reset_job_store()
+        config = self._config(enabled=True)
+        import time as _t
+
+        def slow_screen(strategy, **kwargs):
+            _t.sleep(0.3)
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=slow_screen))
+        with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+            first = alphasift_endpoint.alphasift_submit_screen_job(
+                alphasift_endpoint.AlphaSiftScreenRequest(market="cn", strategy="dual_low", max_results=3),
+                config=config,
+            )
+            second = alphasift_endpoint.alphasift_submit_screen_job(
+                alphasift_endpoint.AlphaSiftScreenRequest(market="cn", strategy="quality_value", max_results=5),
+                config=config,
+            )
+            self.assertEqual(first["job_id"], second["job_id"])
+            self._wait_job(first["job_id"])
+
+    def test_submit_job_rejects_when_disabled(self) -> None:
+        self._reset_job_store()
+        config = self._config(enabled=False)
+        with self.assertRaises(HTTPException) as caught:
+            alphasift_endpoint.alphasift_submit_screen_job(
+                alphasift_endpoint.AlphaSiftScreenRequest(market="cn", strategy="dual_low", max_results=3),
+                config=config,
+            )
+        self.assertEqual(caught.exception.status_code, 403)
+
+    def test_get_unknown_job_returns_404(self) -> None:
+        self._reset_job_store()
+        with self.assertRaises(HTTPException) as caught:
+            alphasift_endpoint.alphasift_get_screen_job(job_id="missing")
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertEqual(caught.exception.detail["error"], "alphasift_screen_job_not_found")
+
+    def test_failed_job_poll_reports_error(self) -> None:
+        self._reset_job_store()
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            screen=MagicMock(side_effect=ValueError("bad strategy")),
+        )
+        with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+            submitted = alphasift_endpoint.alphasift_submit_screen_job(
+                alphasift_endpoint.AlphaSiftScreenRequest(market="cn", strategy="dual_low", max_results=3),
+                config=config,
+            )
+            done = self._wait_job(submitted["job_id"])
+        self.assertEqual(done["status"], "failed")
+        self.assertIn("bad strategy", done["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

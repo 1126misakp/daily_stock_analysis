@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from api.deps import get_config_dep
 from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC
 from src.auth import COOKIE_NAME, is_auth_enabled, verify_session
+from src.services.alphasift_screen_jobs import AlphaSiftScreenJobStore
 
 router = APIRouter()
 
@@ -257,6 +258,48 @@ def run_alphasift_screen(
         "warnings": raw_data.get("warnings") or [],
         "source_errors": raw_data.get("source_errors") or [],
     }
+
+
+@router.post("/screen/jobs")
+def alphasift_submit_screen_job(
+    request: AlphaSiftScreenRequest,
+    config: Config = Depends(get_config_dep),
+) -> Dict[str, Any]:
+    # 同步快速校验（秒级），失败直接返回错误码，不建 job
+    _ensure_alphasift_enabled(config)
+    _ensure_supported_market(request.market)
+    _ensure_supported_strategy(request.strategy)
+
+    store = AlphaSiftScreenJobStore.get_instance()
+
+    def _run(*, market: str, strategy: str, max_results: int) -> Dict[str, Any]:
+        return run_alphasift_screen(
+            config, market=market, strategy=strategy, max_results=max_results
+        )
+
+    job = store.submit(request.market, request.strategy, request.max_results, _run)
+    return {"job_id": job.job_id, "status": job.status}
+
+
+@router.get("/screen/jobs/{job_id}")
+def alphasift_get_screen_job(job_id: str) -> Dict[str, Any]:
+    # 纯内存查询：不调用任何 AlphaSift 适配层
+    store = AlphaSiftScreenJobStore.get_instance()
+    job = store.get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "alphasift_screen_job_not_found",
+                "message": "选股任务不存在或已过期，请重新运行。",
+            },
+        )
+    payload: Dict[str, Any] = {"job_id": job.job_id, "status": job.status}
+    if job.status == "completed" and isinstance(job.result, dict):
+        payload.update(job.result)
+    elif job.status == "failed":
+        payload["error"] = job.error or "选股失败"
+    return payload
 
 
 def _ensure_alphasift_enabled(config: Config) -> None:
