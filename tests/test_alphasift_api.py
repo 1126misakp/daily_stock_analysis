@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -376,6 +377,75 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
         self.assertEqual(caught.exception.status_code, 422)
         self.assertEqual(caught.exception.detail["error"], "alphasift_invalid_market")
+
+    def test_run_screen_injects_and_restores_llm_env(self) -> None:
+        config = Config(
+            alphasift_enabled=True,
+            llm_channels=[{"name": "mimo", "api_keys": ["KEY123"], "base_url": "https://mimo.example/v1"}],
+        )
+        seen = {}
+
+        def fake_screen(strategy, **kwargs):
+            seen["key"] = os.environ.get("LLM_API_KEY")
+            seen["base"] = os.environ.get("LLM_BASE_URL")
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=fake_screen))
+        os.environ.pop("LLM_API_KEY", None)
+        os.environ.pop("LLM_BASE_URL", None)
+
+        with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+            alphasift_endpoint.run_alphasift_screen(
+                config, market="cn", strategy="dual_low", max_results=5,
+            )
+
+        self.assertEqual(seen["key"], "KEY123")
+        self.assertEqual(seen["base"], "https://mimo.example/v1")
+        self.assertNotIn("LLM_API_KEY", os.environ)
+        self.assertNotIn("LLM_BASE_URL", os.environ)
+
+    def test_run_screen_skips_injection_without_channel_keys(self) -> None:
+        config = Config(alphasift_enabled=True, llm_channels=[{"name": "mimo", "api_keys": []}])
+        seen = {}
+
+        def fake_screen(strategy, **kwargs):
+            seen["key"] = os.environ.get("LLM_API_KEY")
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=fake_screen))
+        os.environ.pop("LLM_API_KEY", None)
+
+        with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+            alphasift_endpoint.run_alphasift_screen(
+                config, market="cn", strategy="dual_low", max_results=5,
+            )
+
+        self.assertIsNone(seen["key"])
+
+    def test_run_screen_overrides_stale_base_url_when_channel_has_none(self) -> None:
+        config = Config(
+            alphasift_enabled=True,
+            llm_channels=[{"name": "mimo", "api_keys": ["KEY123"], "base_url": ""}],
+        )
+        seen = {}
+
+        def fake_screen(strategy, **kwargs):
+            seen["base"] = os.environ.get("LLM_BASE_URL")
+            return {"candidates": []}
+
+        fake_module = _make_adapter_module(screen=MagicMock(side_effect=fake_screen))
+        os.environ["LLM_BASE_URL"] = "https://stale.example/v1"
+        try:
+            with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+                alphasift_endpoint.run_alphasift_screen(
+                    config, market="cn", strategy="dual_low", max_results=5,
+                )
+            # 调用期间不得看到旧的 stale base_url（应被覆盖为空串）
+            self.assertEqual(seen["base"], "")
+            # 调用结束后恢复原值
+            self.assertEqual(os.environ.get("LLM_BASE_URL"), "https://stale.example/v1")
+        finally:
+            os.environ.pop("LLM_BASE_URL", None)
 
     def test_screen_maps_adapter_value_error_to_bad_request(self) -> None:
         config = self._config(enabled=True)

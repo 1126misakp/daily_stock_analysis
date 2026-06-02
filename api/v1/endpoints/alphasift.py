@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import inspect
 import math
@@ -189,31 +190,47 @@ def alphasift_screen(
     request: AlphaSiftScreenRequest,
     config: Config = Depends(get_config_dep),
 ) -> Dict[str, Any]:
+    return run_alphasift_screen(
+        config,
+        market=request.market,
+        strategy=request.strategy,
+        max_results=request.max_results,
+    )
+
+
+def run_alphasift_screen(
+    config: Config,
+    *,
+    market: str,
+    strategy: str,
+    max_results: int,
+) -> Dict[str, Any]:
     _ensure_alphasift_enabled(config)
-    _ensure_supported_market(request.market)
-    _ensure_supported_strategy(request.strategy)
+    _ensure_supported_market(market)
+    _ensure_supported_strategy(strategy)
 
     adapter = _get_dsa_adapter()
     screen = _get_adapter_callable(adapter, "screen", "screen() 不可调用。")
-    try:
-        raw = _call_alphasift_screen(screen, request.strategy, request.market, request.max_results)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "alphasift_screen_rejected", "message": str(exc)},
-        ) from exc
-    except (TypeError, KeyError) as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"error": "alphasift_invalid_input", "message": f"AlphaSift 参数非法：{exc}"},
-        ) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(
-            status_code=424,
-            detail={"error": "alphasift_screen_failed", "message": f"AlphaSift 选股运行失败：{exc}"},
-        ) from exc
+    with _alphasift_llm_env(config):
+        try:
+            raw = _call_alphasift_screen(screen, strategy, market, max_results)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "alphasift_screen_rejected", "message": str(exc)},
+            ) from exc
+        except (TypeError, KeyError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "alphasift_invalid_input", "message": f"AlphaSift 参数非法：{exc}"},
+            ) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=424,
+                detail={"error": "alphasift_screen_failed", "message": f"AlphaSift 选股运行失败：{exc}"},
+            ) from exc
 
     raw_data = _to_plain(raw)
     if not isinstance(raw_data, dict):
@@ -221,14 +238,14 @@ def alphasift_screen(
     raw_data = _remove_non_finite_json_values(raw_data)
 
     candidates = _normalize_candidates(raw_data)
-    selected = candidates[: request.max_results]
+    selected = candidates[:max_results]
     return {
         "enabled": True,
         "candidates": selected,
         "candidate_count": len(selected),
         "run_id": raw_data.get("run_id"),
-        "strategy": raw_data.get("strategy") or request.strategy,
-        "market": raw_data.get("market") or request.market,
+        "strategy": raw_data.get("strategy") or strategy,
+        "market": raw_data.get("market") or market,
         "snapshot_count": raw_data.get("snapshot_count"),
         "after_filter_count": raw_data.get("after_filter_count"),
         "llm_ranked": raw_data.get("llm_ranked"),
@@ -288,6 +305,37 @@ def _prepare_alphasift_runtime_env() -> None:
     package_strategies_dir = Path(spec.origin).resolve().parent / "strategies"
     if package_strategies_dir.is_dir():
         os.environ["STRATEGIES_DIR"] = str(package_strategies_dir)
+
+
+@contextlib.contextmanager
+def _alphasift_llm_env(config: Config):
+    """临时把 DSA 主 LLM 渠道的 key/base_url 注入 AlphaSift 读取的 LLM_API_KEY/LLM_BASE_URL，
+    调用结束后还原。AlphaSift 0.2.0 的 _resolve_llm_api_key/base_url 把这两个变量当最高优先级覆盖。"""
+    # 注：直接改全局 os.environ，仅在选股 job 串行(单worker)执行下安全。
+    channel = next(
+        (c for c in (config.llm_channels or []) if c.get("api_keys")),  # 取第一个含 api_keys 的渠道作为主渠道（按 llm_channels 顺序约定）
+        None,
+    )
+    if not channel:
+        yield
+        return
+
+    api_key = str(channel["api_keys"][0])
+    base_url = str(channel.get("base_url") or "")
+    previous = {
+        "LLM_API_KEY": os.environ.get("LLM_API_KEY"),
+        "LLM_BASE_URL": os.environ.get("LLM_BASE_URL"),
+    }
+    os.environ["LLM_API_KEY"] = api_key
+    os.environ["LLM_BASE_URL"] = base_url
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _get_dsa_adapter() -> Any:
