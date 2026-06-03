@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增 Agent 工具 `get_intraday_volume`：让「问股」技术面分析获取单只 A 股盘中 5 分钟实时量能（最新 bar 量比、放量/缩量/正常判定、今日累计量、最近几根 bar），口径与盘中飞书告警一致；已纳入技术面 Agent 工具白名单，非盘中时段返回最近可得数据并标注状态。
+- [改进] 盘中量能飞书推送在股票代码后补充股票名称（取名失败时退化为仅代码）。
 - [新功能] 新增盘中分钟级量能监控：交易时段每 N 分钟扫描自选股∪持仓股(仅A股)的 5 分钟成交量，对比近 20 交易日同时段均量识别放量(≥2.0x)/缩量(≤0.5x)，当日同股同类型首次合并推送飞书；默认关闭，经 `INTRADAY_VOLUME_MONITOR_ENABLED` 等 .env 配置开启。
 - [修复] 自研选股修正成交额单位（Tushare daily amount 千元换算为元）并将流动性阈值调整为 5000 万元，修复仅按偏好选股几乎总返回空的问题。
 - [修复] 自研选股 LLM 重排兼容代码围栏包裹、含 trailing comma 及前后多余文本的 JSON 响应，减少误降级。
