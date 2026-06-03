@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增盘中分钟级量能监控：交易时段每 N 分钟扫描自选股∪持仓股(仅A股)的 5 分钟成交量，对比近 20 交易日同时段均量识别放量(≥2.0x)/缩量(≤0.5x)，当日同股同类型首次合并推送飞书；默认关闭，经 `INTRADAY_VOLUME_MONITOR_ENABLED` 等 .env 配置开启。
 - [修复] 自研选股修正成交额单位（Tushare daily amount 千元换算为元）并将流动性阈值调整为 5000 万元，修复仅按偏好选股几乎总返回空的问题。
 - [修复] 自研选股 LLM 重排兼容代码围栏包裹、含 trailing comma 及前后多余文本的 JSON 响应，减少误降级。
 - [改进] 自研选股收紧 box_oscillation（贴底阈值收紧至 4% 并按贴底程度打分）与 growth_quality（PE 区间收紧至 (0,40]、市值门槛提升至 50 亿）足切条件，降低候选池截断时同分丢优问题。
