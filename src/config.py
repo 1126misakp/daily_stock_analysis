@@ -727,6 +727,15 @@ class Config:
     agent_event_monitor_interval_minutes: int = 5  # Polling interval for event monitor background checks
     agent_event_alert_rules_json: str = ""  # JSON array of serialized EventMonitor rules
 
+    # 盘中分钟级量能监控（独立于告警中心）
+    intraday_volume_monitor_enabled: bool = False
+    intraday_volume_monitor_interval_minutes: int = 5
+    intraday_volume_surge_ratio: float = 2.0
+    intraday_volume_shrink_ratio: float = 0.5
+    intraday_volume_baseline_days: int = 20
+    intraday_volume_baseline_min_samples: int = 5
+    intraday_volume_include_holdings: bool = True
+
     # === 通知配置（可同时配置多个，全部推送）===
     
     # 企业微信 Webhook
@@ -1533,6 +1542,40 @@ class Config:
                 minimum=1,
             ),
             agent_event_alert_rules_json=os.getenv('AGENT_EVENT_ALERT_RULES_JSON', ''),
+            intraday_volume_monitor_enabled=parse_env_bool(
+                os.getenv('INTRADAY_VOLUME_MONITOR_ENABLED'), default=False
+            ),
+            intraday_volume_monitor_interval_minutes=parse_env_int(
+                os.getenv('INTRADAY_VOLUME_MONITOR_INTERVAL_MINUTES'),
+                5,
+                field_name='INTRADAY_VOLUME_MONITOR_INTERVAL_MINUTES',
+                minimum=1,
+            ),
+            intraday_volume_surge_ratio=parse_env_float(
+                os.getenv('INTRADAY_VOLUME_SURGE_RATIO'),
+                2.0,
+                field_name='INTRADAY_VOLUME_SURGE_RATIO',
+            ),
+            intraday_volume_shrink_ratio=parse_env_float(
+                os.getenv('INTRADAY_VOLUME_SHRINK_RATIO'),
+                0.5,
+                field_name='INTRADAY_VOLUME_SHRINK_RATIO',
+            ),
+            intraday_volume_baseline_days=parse_env_int(
+                os.getenv('INTRADAY_VOLUME_BASELINE_DAYS'),
+                20,
+                field_name='INTRADAY_VOLUME_BASELINE_DAYS',
+                minimum=1,
+            ),
+            intraday_volume_baseline_min_samples=parse_env_int(
+                os.getenv('INTRADAY_VOLUME_BASELINE_MIN_SAMPLES'),
+                5,
+                field_name='INTRADAY_VOLUME_BASELINE_MIN_SAMPLES',
+                minimum=1,
+            ),
+            intraday_volume_include_holdings=parse_env_bool(
+                os.getenv('INTRADAY_VOLUME_INCLUDE_HOLDINGS'), default=True
+            ),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),
