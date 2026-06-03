@@ -627,7 +627,7 @@ def _handle_get_intraday_volume(
             })
 
         # 价/涨跌幅（尽力而为，失败不影响量能判定）
-        price = float(ref["close"]) if "close" in df.columns else None
+        price = round(float(ref["close"]), 2) if "close" in df.columns else None
         change_pct = None
         try:
             change_pct = _extract_change_pct(_manager.get_realtime_quote(stock_code))

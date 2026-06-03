@@ -140,6 +140,12 @@ class IntradayVolumeToolTestCase(unittest.TestCase):
         self.assertIn("get_intraday_volume", names)
         self.assertIn("get_intraday_volume", TechnicalAgent.tool_names)
 
+    def test_price_is_rounded(self):
+        df = _intraday_df(today_closed_vol=3000.0)
+        df.loc[df.index[-2], "close"] = 38.499999999999986  # 浮点噪声（参考 bar=倒数第二根）
+        r = _call(df)
+        self.assertEqual(r["price"], 38.5)
+
     def test_recent_bars_shape(self):
         r = _call(_intraday_df(today_closed_vol=3000.0))
         self.assertIsInstance(r["recent_bars"], list)
