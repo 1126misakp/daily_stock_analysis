@@ -174,8 +174,11 @@ async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
     app.state.system_config_service = SystemConfigService()
     _schedule_stock_index_background_refresh(app, "startup")
+    from api.mcp.server import get_mcp_session_manager
+    session_manager = get_mcp_session_manager()
     try:
-        yield
+        async with session_manager.run():
+            yield
     finally:
         refresh_task = getattr(app.state, "stock_index_refresh_task", None)
         if refresh_task is not None and not refresh_task.done():
@@ -253,6 +256,14 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
     # ============================================================
     
     app.include_router(api_v1_router)
+
+    # MCP 工具中转站（挂在现有进程的 /mcp 路由，API Key 鉴权）
+    # 归一化中间件：把精确 /mcp 改写为 /mcp/，使 Mount 命中（否则落 SPA 兜底 405）。
+    # add_middleware 后加者为最外层、最先执行，恰好在路由前完成改写。
+    from api.mcp.server import build_mcp_asgi_app, MCPPathNormalizerMiddleware
+    app.add_middleware(MCPPathNormalizerMiddleware)
+    app.mount("/mcp", build_mcp_asgi_app())
+
     add_error_handlers(app)
     
     # ============================================================

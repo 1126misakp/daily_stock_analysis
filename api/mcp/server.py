@@ -132,3 +132,23 @@ def build_mcp_asgi_app():
         await get_mcp_session_manager().handle_request(scope, receive, send)
 
     return MCPAuthMiddleware(handle_streamable_http, load_mcp_api_keys())
+
+
+class MCPPathNormalizerMiddleware:
+    """纯 ASGI 中间件：在路由前把精确路径 ``/mcp`` 改写为 ``/mcp/``。
+
+    Starlette ``Mount('/mcp')`` 只匹配 ``/mcp/...``，精确 ``/mcp``（无尾斜杠）会落到
+    SPA 兜底路由（GET-only）返回 405；而生产 curl 与多数 MCP 客户端都用无斜杠地址。
+    这里在进入路由前归一化路径，使 ``/mcp`` 也命中 MCP 子应用。非 BaseHTTPMiddleware，
+    不触碰认证/SPA 逻辑，开销可忽略。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+            if scope.get("raw_path") == b"/mcp":
+                scope["raw_path"] = b"/mcp/"
+        await self.app(scope, receive, send)
