@@ -29,6 +29,7 @@ class TechnicalAgent(BaseAgent):
         "analyze_trend",
         "calculate_ma",
         "get_volume_analysis",
+        "get_intraday_volume",
         "analyze_pattern",
         "get_chip_distribution",
         "get_analysis_context",

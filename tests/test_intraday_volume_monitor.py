@@ -40,6 +40,7 @@ class MonitorTestCase(unittest.TestCase):
         cfg = cfg or _cfg()
         manager = MagicMock()
         manager.get_intraday_kline.return_value = df
+        manager.get_stock_name.return_value = ""  # 默认无名，渲染退化为仅代码
         notifier = MagicMock()
         notifier.send.return_value = True
         now = datetime(2026, 6, 3, 10, 6, 0)
@@ -73,6 +74,25 @@ class MonitorTestCase(unittest.TestCase):
         content = notifier.send.call_args.args[0]
         self.assertIn("600036", content)
         self.assertIn("放量", content)
+
+    def test_render_includes_stock_name(self) -> None:
+        monitor, manager, notifier = self._make(
+            phase=MarketPhase.INTRADAY, df=_live_df("2026-06-03", 3000), baseline_value=1000.0
+        )
+        manager.get_stock_name.return_value = "招商银行"
+        monitor.run_once()
+        content = notifier.send.call_args.args[0]
+        self.assertIn("招商银行", content)
+        self.assertIn("600036", content)
+
+    def test_render_without_name_falls_back_to_code_only(self) -> None:
+        monitor, manager, notifier = self._make(
+            phase=MarketPhase.INTRADAY, df=_live_df("2026-06-03", 3000), baseline_value=1000.0
+        )
+        manager.get_stock_name.return_value = None  # 取名失败不报错
+        monitor.run_once()
+        content = notifier.send.call_args.args[0]
+        self.assertIn("600036", content)
 
     def test_dedup_same_stock_same_type_once_per_day(self) -> None:
         monitor, manager, notifier = self._make(

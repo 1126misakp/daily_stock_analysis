@@ -512,9 +512,183 @@ analyze_pattern_tool = ToolDefinition(
 )
 
 
+# ============================================================
+# get_intraday_volume — 盘中 5 分钟实时量能（与飞书盘中告警同口径）
+# ============================================================
+
+_VERDICT_CN = {"surge": "放量", "shrink": "缩量", "normal": "正常"}
+
+
+def _extract_change_pct(quote) -> Optional[float]:
+    """从实时报价对象/字典中尽力取涨跌幅(%)，取不到返回 None。"""
+    if quote is None:
+        return None
+    raw = quote.get("change_pct") if isinstance(quote, dict) else getattr(quote, "change_pct", None)
+    if raw is None:
+        return None
+    try:
+        return round(float(raw), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _handle_get_intraday_volume(
+    stock_code: str,
+    *,
+    _manager=None,
+    _config=None,
+    _now=None,
+    _phase=None,
+) -> dict:
+    """返回单只 A 股的盘中 5 分钟实时量能画像。
+
+    复用 intraday_volume 的 ``compute_slot_baselines`` + ``classify``（与飞书盘中告警同口径），
+    单次 ``get_intraday_kline`` 取数，全程降级不抛错。隐藏参数 ``_manager/_config/_now/_phase``
+    仅供测试注入，不在工具 schema 中暴露给 LLM。
+    """
+    import pandas as pd
+
+    from src.core.trading_calendar import MarketPhase, get_market_now, infer_market_phase
+    from src.services.intraday_volume.baseline import (
+        _date_of,
+        _slot_of,
+        compute_slot_baselines,
+    )
+    from src.services.intraday_volume.detector import classify
+
+    try:
+        if _config is None:
+            from src.config import get_config
+            _config = get_config()
+        if _manager is None:
+            from data_provider import DataFetcherManager
+            _manager = DataFetcherManager()
+
+        baseline_days = int(getattr(_config, "intraday_volume_baseline_days", 20))
+        min_samples = int(getattr(_config, "intraday_volume_baseline_min_samples", 5))
+        surge_ratio = float(getattr(_config, "intraday_volume_surge_ratio", 2.0))
+        shrink_ratio = float(getattr(_config, "intraday_volume_shrink_ratio", 0.5))
+
+        count = (baseline_days + 5) * 48  # 48 根 5m bar/日，+5 余量应对近期停牌
+        try:
+            df = _manager.get_intraday_kline(stock_code, period="5m", count=count)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[get_intraday_volume] 取数失败 %s: %s", stock_code, exc)
+            return {"stock_code": stock_code, "error": "盘中量能取数失败（数据源异常）"}
+
+        if df is None or getattr(df, "empty", True) or "datetime" not in df.columns:
+            return {"stock_code": stock_code, "error": "无盘中量能数据（非A股或TickFlow无数据）"}
+
+        # 市场状态（市场码必须小写 cn）
+        now = _now or get_market_now("cn")
+        phase = _phase or infer_market_phase("cn", now)
+        intraday_phases = {MarketPhase.INTRADAY, MarketPhase.CLOSING_AUCTION}
+
+        # 选定参考 bar：盘中取倒数第二根（最后一根可能未收满），其余取最后一根
+        if phase in intraday_phases and len(df) >= 2:
+            ref = df.iloc[len(df) - 2]
+        else:
+            ref = df.iloc[len(df) - 1]
+        ref_dt = ref["datetime"]
+        ref_date = _date_of(ref_dt)
+        ref_slot = _slot_of(ref_dt)
+
+        today_str = now.strftime("%Y-%m-%d")
+        if phase in intraday_phases:
+            as_of_note = "盘中实时"
+        elif ref_date == today_str:
+            as_of_note = "今日已收盘/非连续竞价时段，为今日最新数据"
+        else:
+            as_of_note = f"非交易时段/非交易日，为最近交易日({ref_date})数据"
+
+        # 同 slot 历史基线（today_str 传 ref_date → 排除参考 bar 当天，仅用其之前历史）
+        slot_baselines = compute_slot_baselines(df, today_str=ref_date, min_samples=min_samples)
+        baseline = slot_baselines.get(ref_slot)
+        current_vol = float(ref["volume"])
+        signal = classify(current_vol, baseline, surge_ratio=surge_ratio, shrink_ratio=shrink_ratio)
+        ratio = round(signal.ratio, 2) if signal.ratio is not None else None
+        note = "无足够历史基线，量比判定不可用" if baseline is None else None
+
+        # 今日累计量（参考 bar 同日所有 bar）
+        same_day = df[df["datetime"].map(_date_of) == ref_date]
+        today_cum = float(pd.to_numeric(same_day["volume"], errors="coerce").fillna(0).sum())
+
+        # 最近 bar 明细（同日、截至参考 bar，取最近 6 根）
+        upto = same_day[same_day["datetime"].map(str) <= str(ref_dt)].tail(6)
+        recent_bars = []
+        for _, b in upto.iterrows():
+            bslot = _slot_of(b["datetime"])
+            bbase = slot_baselines.get(bslot)
+            bvol = float(b["volume"])
+            recent_bars.append({
+                "time": bslot,
+                "volume": round(bvol, 0),
+                "ratio": round(bvol / bbase, 2) if bbase else None,
+            })
+
+        # 价/涨跌幅（尽力而为，失败不影响量能判定）
+        price = float(ref["close"]) if "close" in df.columns else None
+        change_pct = None
+        try:
+            change_pct = _extract_change_pct(_manager.get_realtime_quote(stock_code))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[get_intraday_volume] 取涨跌幅失败 %s: %s", stock_code, exc)
+
+        try:
+            stock_name = _manager.get_stock_name(stock_code) or ""
+        except Exception:  # noqa: BLE001
+            stock_name = ""
+
+        return {
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "market_phase": phase.value if hasattr(phase, "value") else str(phase),
+            "data_time": str(ref_dt),
+            "as_of_note": as_of_note,
+            "latest_bar": {
+                "slot": ref_slot,
+                "volume": round(current_vol, 0),
+                "baseline_volume": round(baseline, 0) if baseline else None,
+                "ratio": ratio,
+                "verdict": signal.signal_type,
+                "verdict_cn": _VERDICT_CN.get(signal.signal_type, "正常"),
+            },
+            "today_cumulative_volume": round(today_cum, 0),
+            "price": price,
+            "change_pct": change_pct,
+            "recent_bars": recent_bars,
+            "thresholds": {"surge": surge_ratio, "shrink": shrink_ratio},
+            "note": note,
+        }
+    except Exception as exc:  # noqa: BLE001 - 工具绝不抛错
+        logger.warning("[get_intraday_volume] 处理异常 %s: %s", stock_code, exc, exc_info=True)
+        return {"stock_code": stock_code, "error": f"盘中量能处理异常: {exc}"}
+
+
+get_intraday_volume_tool = ToolDefinition(
+    name="get_intraday_volume",
+    description="Get a stock's intraday (5-minute) real-time volume profile for A-shares: the "
+                "latest 5m bar volume vs its same-time-of-day historical baseline (量比/ratio), a "
+                "surge/shrink/normal verdict (放量/缩量/正常, same criteria as the intraday Feishu "
+                "alerts), today's cumulative volume, current price/change, and the most recent few "
+                "5m bars. Use to judge whether volume is expanding or shrinking *right now* during "
+                "the session — complements the daily-bar get_volume_analysis. A-shares only.",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="A-share stock code, e.g., '600519'",
+        ),
+    ],
+    handler=_handle_get_intraday_volume,
+    category="analysis",
+)
+
+
 ALL_ANALYSIS_TOOLS = [
     analyze_trend_tool,
     calculate_ma_tool,
     get_volume_analysis_tool,
     analyze_pattern_tool,
+    get_intraday_volume_tool,
 ]

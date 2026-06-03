@@ -148,8 +148,13 @@ class IntradayVolumeMonitor:
         if key in self._alerted:
             return None
         self._alerted.add(key)
+        try:
+            name = self._get_manager().get_stock_name(code) or ""
+        except Exception:  # noqa: BLE001 - 取名失败不影响告警
+            name = ""
         return {
             "code": code,
+            "name": name,
             "signal_type": signal.signal_type,
             "ratio": signal.ratio,
             "price": float(bar["close"]),
@@ -165,8 +170,9 @@ class IntradayVolumeMonitor:
                 continue
             lines.append(f"{_SIGNAL_EMOJI[stype]} {_SIGNAL_LABEL[stype]}")
             for h in group:
+                label = f"{h['code']} {h['name']}".strip() if h.get("name") else f"{h['code']}"
                 lines.append(
-                    f"  · {h['code']}  量比{h['ratio']:.1f}x  现价{h['price']:.2f}  "
+                    f"  · {label}  量比{h['ratio']:.1f}x  现价{h['price']:.2f}  "
                     f"量{h['current_volume']:.0f}(基线{h['baseline_volume']:.0f})"
                 )
         return "\n".join(lines)
