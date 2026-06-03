@@ -73,6 +73,18 @@ class ToolDefinition:
             },
         }
 
+    def to_mcp_tool(self) -> dict:
+        """Convert to an MCP ``tools/list`` element: {name, description, inputSchema}.
+
+        Returns a plain dict so this core module stays free of the mcp dependency;
+        the MCP server layer wraps it into ``mcp.types.Tool``.
+        """
+        return {
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": self._params_json_schema(),
+        }
+
 
 # ============================================================
 # Tool Registry
@@ -132,6 +144,10 @@ class ToolRegistry:
     def to_openai_tools(self) -> List[dict]:
         """Generate OpenAI-format tools list (used by litellm for all providers)."""
         return [t.to_openai_tool() for t in self._tools.values()]
+
+    def to_mcp_tools(self) -> List[dict]:
+        """Generate MCP tools/list elements for all registered tools."""
+        return [t.to_mcp_tool() for t in self._tools.values()]
 
     # ----- Execution -----
 
