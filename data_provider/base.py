@@ -2085,6 +2085,50 @@ class DataFetcherManager:
                 continue
         return []
 
+    def _route_single_code_df(self, method_name: str, stock_code: str, **kwargs) -> Optional["pd.DataFrame"]:
+        """Generic read-only passthrough following the existing _fetchers priority
+        chain (TickFlow/Tushare first, akshare last). Returns the first non-empty
+        DataFrame; never alters routing/priority. Mirrors get_belong_boards()
+        including its normalize + A-share guard (these granular capabilities are
+        A-share-only via tushare_fetcher)."""
+        stock_code = normalize_stock_code(stock_code)
+        if _market_tag(stock_code) != "cn":
+            return None
+        for fetcher in self._fetchers:
+            if not hasattr(fetcher, method_name):
+                continue
+            try:
+                df = getattr(fetcher, method_name)(stock_code, **kwargs)
+                if df is not None and not getattr(df, "empty", False):
+                    logger.info(f"[{fetcher.name}] {method_name} 成功: {stock_code}")
+                    return df
+            except Exception as e:
+                logger.warning(f"[{fetcher.name}] {method_name} 失败: {e}")
+        return None
+
+    def get_income_statement(self, stock_code: str) -> Optional["pd.DataFrame"]:
+        return self._route_single_code_df("get_income_statement", stock_code)
+
+    def get_cashflow_statement(self, stock_code: str) -> Optional["pd.DataFrame"]:
+        return self._route_single_code_df("get_cashflow_statement", stock_code)
+
+    def get_fina_indicator(self, stock_code: str) -> Optional["pd.DataFrame"]:
+        return self._route_single_code_df("get_fina_indicator", stock_code)
+
+    def get_pledge_detail(self, stock_code: str) -> Optional["pd.DataFrame"]:
+        return self._route_single_code_df("get_pledge_detail", stock_code)
+
+    def get_holder_trade(self, stock_code: str) -> Optional["pd.DataFrame"]:
+        return self._route_single_code_df("get_holder_trade", stock_code)
+
+    def get_share_float(self, stock_code: str) -> Optional["pd.DataFrame"]:
+        return self._route_single_code_df("get_share_float", stock_code)
+
+    def get_repurchase(self, stock_code: str, start_date: Optional[str] = None,
+                       end_date: Optional[str] = None) -> Optional["pd.DataFrame"]:
+        return self._route_single_code_df(
+            "get_repurchase", stock_code, start_date=start_date, end_date=end_date)
+
     def get_intraday_kline(
         self, stock_code: str, period: str = "5m", count: int = 240
     ) -> Optional[pd.DataFrame]:
