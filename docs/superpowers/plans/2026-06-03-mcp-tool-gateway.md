@@ -52,10 +52,10 @@
 
 - [ ] **Step 1: 在 requirements.txt 追加依赖**
 
-在 `requirements.txt` 末尾新增一行（保持与现有风格一致，不要改动其他行）：
+在 `requirements.txt` 末尾新增一行（保持与现有风格一致，不要改动其他行）。**钉死大版本上限**，因为本计划所有 SDK API 形状（lowlevel.Server 装饰器签名、StreamableHTTPSessionManager 构造参数、TransportSecuritySettings 字段）都对版本敏感：
 
 ```
-mcp>=1.9.0
+mcp>=1.9.0,<2
 ```
 
 - [ ] **Step 2: 安装到项目虚拟环境**
@@ -65,17 +65,34 @@ Run:
 cd "/Volumes/Mac硬盘/project/股票分析部署/daily_stock_analysis"
 [ -d .venv ] || python -m venv .venv
 source .venv/bin/activate
-pip install "mcp>=1.9.0"
+pip install "mcp>=1.9.0,<2"
+pip show mcp | grep -i version   # 记录实际版本，后续任务以此版本的 API 为准
 ```
-Expected: 安装成功，无错误。
+Expected: 安装成功，无错误，打印实际版本。
 
-- [ ] **Step 3: 验证关键导入可用**
+- [ ] **Step 3: 验证关键导入 + 装饰器签名契约可用**
+
+不仅验证类能 import，还要**实际跑通 `Server` 的 `list_tools`/`call_tool` 装饰器注册**（不发请求，只确认装饰器接受我们计划用的回调签名）。不同 mcp 版本回调签名差异较大，这步能在最早期暴露版本不符。
 
 Run:
 ```bash
-source .venv/bin/activate && python -c "from mcp.server.lowlevel import Server; from mcp.server.streamable_http_manager import StreamableHTTPSessionManager; from mcp.server.transport_security import TransportSecuritySettings; import mcp.types as t; print('mcp ok', t.Tool.__name__, t.TextContent.__name__)"
+source .venv/bin/activate && python -c "
+from mcp.server.lowlevel import Server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
+import mcp.types as t
+s = Server('probe')
+@s.list_tools()
+async def _lt():
+    return []
+@s.call_tool()
+async def _ct(name, arguments):
+    return []
+print('mcp ok', t.Tool.__name__, t.TextContent.__name__, 'decorators ok')
+"
 ```
-Expected: 打印 `mcp ok Tool TextContent`。若导入路径报错，说明 SDK 版本差异——记录实际版本 `pip show mcp` 并据此修正后续任务中的导入路径。
+Expected: 打印 `mcp ok Tool TextContent decorators ok`。
+**若此处报 `TypeError`（call_tool/list_tools 签名不符）或导入路径报错**：说明实际安装版本 API 不同，**以实际版本签名为准**调整 Task 5 的 `_list_tools/_call_tool`，并把差异记入计划"风险点"，不要硬套本计划的签名。
 
 - [ ] **Step 4: Commit**
 
@@ -253,6 +270,15 @@ class TestGranularRouting(unittest.TestCase):
         self.assertIsNotNone(out)
         f.get_repurchase.assert_called_once_with("600519", start_date="20250101", end_date="20250201")
 
+    def test_non_a_share_returns_none_without_calling_fetcher(self):
+        """granular 能力 A 股专属：港股/美股代码应早返回 None，不触达 fetcher。"""
+        f = MagicMock()
+        f.name = "tushare"
+        mgr = _manager_with([f])
+        self.assertIsNone(mgr.get_income_statement("AAPL"))
+        self.assertIsNone(mgr.get_income_statement("hk00700"))
+        f.get_income_statement.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -271,7 +297,12 @@ Expected: FAIL，`AttributeError: 'DataFetcherManager' object has no attribute '
     def _route_single_code_df(self, method_name: str, stock_code: str, **kwargs) -> Optional["pd.DataFrame"]:
         """Generic read-only passthrough following the existing _fetchers priority
         chain (TickFlow/Tushare first, akshare last). Returns the first non-empty
-        DataFrame; never alters routing/priority. Mirrors get_belong_boards()."""
+        DataFrame; never alters routing/priority. Mirrors get_belong_boards()
+        including its normalize + A-share guard (these granular capabilities are
+        A-share-only via tushare_fetcher)."""
+        stock_code = normalize_stock_code(stock_code)
+        if _market_tag(stock_code) != "cn":
+            return None
         for fetcher in self._fetchers:
             if not hasattr(fetcher, method_name):
                 continue
@@ -308,7 +339,9 @@ Expected: FAIL，`AttributeError: 'DataFetcherManager' object has no attribute '
             "get_repurchase", stock_code, start_date=start_date, end_date=end_date)
 ```
 
-> 注意：`get_repurchase` 通过 `_route_single_code_df` 的 `**kwargs` 透传日期；`_route_single_code_df` 调用 `getattr(fetcher, method_name)(stock_code, **kwargs)`，与 fetcher 层 `get_repurchase(self, stock_code, start_date=None, end_date=None)` 签名一致。
+> 注意 1：`normalize_stock_code` 与 `_market_tag` 已在 `base.py` 内被现有 `get_belong_boards` 使用，无需新增 import。实现前先 `grep -nE "def normalize_stock_code|def _market_tag|normalize_stock_code\(|_market_tag\(" data_provider/base.py` 确认两者在 `DataFetcherManager` 作用域可见（应为模块级函数或可访问符号）；若 `_market_tag` 实际名称不同（如 `_resolve_market`），以 `get_belong_boards` 里的真实调用为准照搬。
+>
+> 注意 2：`get_repurchase` 通过 `_route_single_code_df` 的 `**kwargs` 透传日期；`_route_single_code_df` 调用 `getattr(fetcher, method_name)(stock_code, **kwargs)`，与 fetcher 层 `get_repurchase(self, stock_code, start_date=None, end_date=None)` 签名一致。
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -342,6 +375,8 @@ git commit -m "feat: add read-only granular passthrough methods to DataFetcherMa
 - 单股盘中：`get_intraday_kline`(DataFrame)、`get_order_book`(dict)
 - 全市场：`get_limit_up_pool`、`get_hot_stocks`、`get_concept_rankings`、`get_market_stats`
 
+> 映射说明：`get_dragon_tiger` 调 manager 已 routed 的 `get_dragon_tiger_context(stock_code)`（base.py L3395 存在），**以此为准，覆盖 spec 第 5.2 节表里 `get_top_list/get_top_inst` 的笔误**——那两个只在 fetcher 层、manager 无 routed 版，不能直接用。`get_dragon_tiger_context` 第二参 `budget_seconds` 可选，handler 只传 `stock_code` 正确。
+
 - [ ] **Step 1: 写失败测试**
 
 创建 `tests/test_dataset_tools.py`：
@@ -364,12 +399,18 @@ class TestDatasetTools(unittest.TestCase):
         self.addCleanup(patcher.stop)
         patcher.start()
 
-    def test_all_dataset_tools_count_and_names(self):
+    def test_all_dataset_tools_exact_16(self):
         names = {t.name for t in dt.ALL_DATASET_TOOLS}
+        expected = {
+            "get_income_statement", "get_cashflow_statement", "get_financial_indicators",
+            "get_pledge_detail", "get_holder_trade", "get_share_float", "get_repurchase",
+            "get_dragon_tiger", "get_risk_assessment", "get_stock_sectors",
+            "get_intraday_kline", "get_order_book", "get_limit_up_pool",
+            "get_hot_stocks", "get_concept_rankings", "get_market_stats",
+        }
         self.assertEqual(len(dt.ALL_DATASET_TOOLS), 16)
-        self.assertIn("get_income_statement", names)
-        self.assertIn("get_risk_assessment", names)
-        self.assertNotIn("get_price_percentile", names)  # 已替换
+        self.assertEqual(names, expected)  # 恰好这 16 个，锁死回归
+        self.assertNotIn("get_price_percentile", names)  # 已被 get_risk_assessment 替换
 
     def test_income_statement_serializes_dataframe(self):
         self.mgr.get_income_statement.return_value = pd.DataFrame(
@@ -424,28 +465,20 @@ akshare 末位）。DataFrame 结果统一序列化为 records；None/空 → {"
 from __future__ import annotations
 
 import logging
-from threading import Lock
 from typing import Any, Dict, List, Optional
 
 from src.agent.tools.registry import ToolDefinition, ToolParameter
 
 logger = logging.getLogger(__name__)
 
-_manager_singleton = None
-_manager_lock = Lock()
-
 _MAX_ROWS = 60
 
 
 def _get_fetcher_manager():
-    """Lazy singleton（复用同一 manager，避免重复初始化 Tushare）。"""
-    from data_provider import DataFetcherManager
-    global _manager_singleton
-    if _manager_singleton is None:
-        with _manager_lock:
-            if _manager_singleton is None:
-                _manager_singleton = DataFetcherManager()
-    return _manager_singleton
+    """复用 data_tools 已有的 manager 单例，避免进程内重复初始化 Tushare/TickFlow
+    （AGENTS.md：优先复用现有入口，不新增平行实现）。"""
+    from src.agent.tools.data_tools import _get_fetcher_manager as _shared
+    return _shared()
 
 
 def _df_to_records(df) -> Optional[List[Dict[str, Any]]]:
@@ -725,6 +758,18 @@ class TestMcpRegistry(unittest.TestCase):
                   "get_income_statement", "get_risk_assessment"):
             self.assertIn(t, names)
 
+    def test_no_duplicate_names_across_sources(self):
+        """防止新增工具与镜像工具撞名被 register 静默覆盖（计数仍 30 却少了一个）。"""
+        from src.agent.tools.data_tools import ALL_DATA_TOOLS
+        from src.agent.tools.analysis_tools import ALL_ANALYSIS_TOOLS
+        from src.agent.tools.market_tools import ALL_MARKET_TOOLS
+        from src.agent.tools.search_tools import ALL_SEARCH_TOOLS
+        from src.agent.tools.dataset_tools import ALL_DATASET_TOOLS
+        names = [t.name for t in (ALL_DATA_TOOLS + ALL_ANALYSIS_TOOLS + ALL_MARKET_TOOLS
+                                  + ALL_SEARCH_TOOLS + ALL_DATASET_TOOLS)
+                 if t.name not in mcpsrv.EXCLUDED_TOOL_NAMES]
+        self.assertEqual(len(names), len(set(names)), f"duplicate tool names: {names}")
+
     def test_list_tools_payload_shape(self):
         tools = mcpsrv.build_mcp_registry().to_mcp_tools()
         self.assertEqual(len(tools), 30)
@@ -824,11 +869,14 @@ def build_mcp_registry() -> ToolRegistry:
 
 
 def _dispatch(registry: ToolRegistry, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """同步派发（可单测）：执行工具 handler，错误转结构化 dict。"""
+    """同步派发（可单测）：执行工具 handler，错误转结构化 dict。
+
+    先用 __contains__ 判断工具是否存在（避免 handler 内部自抛 KeyError 被误判为
+    'Unknown tool'），再 try/except 包执行。"""
+    if name not in registry:
+        return {"error": f"Unknown tool: {name}"}
     try:
         return registry.execute(name, **(arguments or {}))
-    except KeyError:
-        return {"error": f"Unknown tool: {name}"}
     except Exception:
         logger.warning(f"[mcp] tool '{name}' execution failed", exc_info=True)
         return {"error": f"Tool execution failed: {name}"}
@@ -1153,28 +1201,33 @@ git commit -m "chore: add no-op rate limiter extension point for MCP gateway"
 
 ## Task 8: 配置项 + .env.example
 
-新增 `mcp_api_keys`、`mcp_dns_rebinding_protection`、`mcp_allowed_hosts` 三个配置字段。**先读 `src/config.py` 现有字段定义模式**（如 dataclass 字段 + 从 env 读取的位置），照葫芦画瓢添加，不要新建平行配置入口。
+新增 `mcp_api_keys`、`mcp_dns_rebinding_protection`、`mcp_allowed_hosts` 三个配置字段。
+
+> ⚠️ **关键约束（prd-reviewer 已核实 config.py 结构）**：`src/config.py` 的 `Config` 是 `@dataclass`，字段一律是**静态默认值**（如 `tushare_token: Optional[str] = None`），**没有任何字段在声明处写 `os.environ.get(...)`**。环境变量读取**集中在 `Config._load_from_env()` 的 `return cls(...)` 构造块里**逐字段 `os.getenv(...)` 注入；`get_config()` 走该路径才能拿到运行时 `data/.env` 的值。因此**必须两处都改**：①声明处加静态默认字段；②`_load_from_env` 的 `cls(...)` 加 `os.getenv` 注入。**绝不可只在声明处写 `os.environ.get`**——那样会在 import 时求值、读不到运行时 `data/.env`，且生产上 `/mcp` 全 401 或裸奔，而只断言 hasattr 的测试还会 PASS，把问题掩盖到生产。
 
 **Files:**
-- Modify: `src/config.py`（以实际配置类为准）
+- Modify: `src/config.py`（两处：dataclass 字段声明 + `_load_from_env` 的 `cls(...)`）
 - Modify: `.env.example`
 - Test: `tests/test_mcp_config.py`
 
-- [ ] **Step 1: 阅读现有 config 字段模式**
+- [ ] **Step 1: 定位两处锚点**
 
-Run: `grep -nE "mimo|llm_channels|tushare_token|class .*Config|= os.environ|getattr|self\." src/config.py | head -40`
-据此确认：字段如何声明、如何从 `.env`/环境变量读取、默认值写法。**按相同模式**添加下面三个字段（字符串型，默认空 / False）。
+Run:
+```bash
+grep -nE "^class Config|def _load_from_env|def parse_env_bool|return cls\(|tushare_token" src/config.py | head -20
+```
+确认：①dataclass 字段区（找一个相邻的 `str`/`bool` 字段如 `tushare_token` 作锚点）；②`_load_from_env` 里 `return cls(` 的构造块（找相邻的 `os.getenv(...)` 行作锚点）；③`parse_env_bool` 辅助函数位置（约 L137，已被广泛使用，复用它解析 bool）。
 
-- [ ] **Step 2: 写失败测试**
+- [ ] **Step 2: 写失败测试（断言真能从环境读到值，而非只 hasattr）**
 
 创建 `tests/test_mcp_config.py`：
 
 ```python
 # -*- coding: utf-8 -*-
-"""确认 MCP 配置字段存在且有安全默认。"""
+"""确认 MCP 配置字段存在、有安全默认，且能从环境变量真实读取。"""
 import unittest
 
-from src.config import get_config
+from src.config import Config, get_config
 
 
 class TestMcpConfigFields(unittest.TestCase):
@@ -1183,29 +1236,55 @@ class TestMcpConfigFields(unittest.TestCase):
         self.assertTrue(hasattr(cfg, "mcp_api_keys"))
         self.assertTrue(hasattr(cfg, "mcp_dns_rebinding_protection"))
         self.assertTrue(hasattr(cfg, "mcp_allowed_hosts"))
-        # 默认不开 DNS rebinding 保护（部署在受信反代后）
-        self.assertIn(getattr(cfg, "mcp_dns_rebinding_protection"), (False, "false", "False", "", None))
+        self.assertFalse(bool(cfg.mcp_dns_rebinding_protection))  # 默认关闭
+
+    def test_reads_from_environment(self):
+        """漏改 _load_from_env 时此用例必失败（只改声明无法从环境读到值）。"""
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"MCP_API_KEYS": "k1:alice",
+                                     "MCP_DNS_REBINDING_PROTECTION": "true"}):
+            Config.reset_instance()
+            try:
+                cfg = get_config()
+                self.assertEqual(cfg.mcp_api_keys, "k1:alice")
+                self.assertTrue(bool(cfg.mcp_dns_rebinding_protection))
+            finally:
+                Config.reset_instance()  # 还原单例，避免污染其他测试
 
 
 if __name__ == "__main__":
     unittest.main()
 ```
 
+> 注：`Config.reset_instance()` 在 `src/config.py` 已存在（约 L2342）。Step 1 若发现实际方法名不同（如 `_reset`/`clear_instance`），以实际为准替换。
+
 - [ ] **Step 3: 运行测试确认失败**
 
 Run: `source .venv/bin/activate && python -m pytest tests/test_mcp_config.py -v`
-Expected: FAIL（`AssertionError: hasattr ... mcp_api_keys` 为 False）。
+Expected: FAIL（字段不存在）。
 
-- [ ] **Step 4: 在 src/config.py 添加字段**
+- [ ] **Step 4: 在 src/config.py 两处同步添加（与现有 60+ 字段一致的模式）**
 
-按 Step 1 观察到的模式添加（下面为**示意**，须与实际配置类风格对齐；若是 dataclass + 从 env 读取，则在声明处加字段、在读取处加 `os.environ.get`）：
+**4a. dataclass 字段区**（紧邻 `tushare_token` 等字符串字段，加静态默认值，**不写 os.environ.get**）：
 
 ```python
-# MCP 工具中转站
-mcp_api_keys: str = os.environ.get("MCP_API_KEYS", "")
-mcp_dns_rebinding_protection: bool = os.environ.get("MCP_DNS_REBINDING_PROTECTION", "false").lower() == "true"
-mcp_allowed_hosts: str = os.environ.get("MCP_ALLOWED_HOSTS", "")
+    # === MCP 工具中转站 ===
+    mcp_api_keys: str = ""
+    mcp_dns_rebinding_protection: bool = False
+    mcp_allowed_hosts: str = ""
 ```
+
+**4b. `_load_from_env` 的 `return cls(...)` 构造块**（紧邻其它 `os.getenv(...)` 注入行追加）：
+
+```python
+            mcp_api_keys=os.getenv('MCP_API_KEYS', ''),
+            mcp_dns_rebinding_protection=parse_env_bool(
+                os.getenv('MCP_DNS_REBINDING_PROTECTION'), default=False),
+            mcp_allowed_hosts=os.getenv('MCP_ALLOWED_HOSTS', ''),
+```
+
+> `parse_env_bool` 是 config.py 现有辅助函数（Step 1 已定位），与其它 bool 字段同款用法；若其签名不是 `(value, default=...)`，以实际签名为准。
 
 - [ ] **Step 5: 更新 .env.example**
 
@@ -1329,7 +1408,50 @@ print('lifespan exited ok')
 ```
 Expected: 打印 `lifespan entered ok` 与 `lifespan exited ok`，无异常。
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: 进程内端到端测试（验证真实 MCP initialize 穿过 auth+mount+BaseHTTPMiddleware+json_response 全链路）**
+
+> 这是核心链路验证。现有 `AuthMiddleware` 是 `BaseHTTPMiddleware`（对非 `/api/v1/*` 放行，已确认不会拦 `/mcp`），但 `BaseHTTPMiddleware` 包裹挂载的原生 ASGI 子应用在某些版本对响应有兼容问题。不发真实 MCP 请求就判"完成"是完成幻觉——必须本地端到端验证，而非拖到 Task 11 生产环境。
+
+在 `tests/test_mcp_app_mount.py` 追加（顶部 import 处加 `import os`）：
+
+```python
+class TestMcpInitializeE2E(unittest.TestCase):
+    def test_initialize_through_full_chain(self):
+        from unittest.mock import patch
+        from starlette.testclient import TestClient
+        from mcp.types import LATEST_PROTOCOL_VERSION
+        from src.config import Config
+
+        with patch.dict(os.environ, {"MCP_API_KEYS": "testkey"}):
+            Config.reset_instance()
+            try:
+                app = create_app()  # 调用时 build_mcp_asgi_app() 读到 testkey
+                init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                    "protocolVersion": LATEST_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0"}}}
+                hdr = {"Authorization": "Bearer testkey",
+                       "Accept": "application/json, text/event-stream",
+                       "Content-Type": "application/json"}
+                with TestClient(app) as client:
+                    r = client.post("/mcp", json=init, headers=hdr)
+                    self.assertEqual(r.status_code, 200, f"chain broke: {r.status_code} {r.text[:300]}")
+                    self.assertTrue("jsonrpc" in r.text or "result" in r.text, r.text[:300])
+                    # 无 key 必须被鉴权中间件拦成 401（响应体为中间件固定体）
+                    r401 = client.post("/mcp", json=init,
+                                       headers={"Accept": "application/json, text/event-stream",
+                                                "Content-Type": "application/json"})
+                    self.assertEqual(r401.status_code, 401)
+            finally:
+                Config.reset_instance()
+```
+
+Run: `source .venv/bin/activate && python -m pytest tests/test_mcp_app_mount.py -v`
+Expected: PASS（2 passed）。
+
+**若此测试失败且定位到 `BaseHTTPMiddleware` 包裹/吞响应头问题**（典型表现：valid key 请求返回 500 或响应体被截断/缺 MCP 字段）——**回退方案**：不要乱改认证中间件逻辑；改为确保 `/mcp` 的 `Mount` 位于 `BaseHTTPMiddleware` 之外，即把 `app.mount("/mcp", ...)` 移到 `add_auth_middleware(app)`**之前**调用，或将 MCP 子应用包成独立 `Starlette(Mount(...))` 再 mount。把实际现象与采用的回退写入计划"风险点/未验证项"，必要时回报用户。
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add api/app.py tests/test_mcp_app_mount.py
@@ -1350,7 +1472,7 @@ git commit -m "feat: mount MCP gateway at /mcp and wire session manager lifespan
 - 端点：`https://a-stock.tech-monthly.online/mcp`（Streamable HTTP，json_response）。
 - 鉴权：请求头 `Authorization: Bearer <MCP_API_KEYS 中的某个 key>`；未配置 key 则一律 401。
 - 工具清单：30 个（指向 spec 第 5 节）。
-- 配置：`data/.env` 的 `MCP_API_KEYS` / `MCP_DNS_REBINDING_PROTECTION` / `MCP_ALLOWED_HOSTS`，改后 `docker compose up -d` 重建生效。
+- 配置：`data/.env` 的 `MCP_API_KEYS` / `MCP_DNS_REBINDING_PROTECTION` / `MCP_ALLOWED_HOSTS`。**`MCP_API_KEYS` 改动后必须 `docker compose -f docker/docker-compose.yml up -d` 重建容器才生效**——鉴权中间件在进程启动时把 key 集合固化进实例（`app = create_app()` 模块级实例化），**WebUI 设置页的热重载不会更新已固化的 MCP key**。
 - 排除项：持仓/分析库/回测工具不对外。
 - 不实现：限流（仅扩展点）。
 
@@ -1399,7 +1521,7 @@ git commit -m "docs: add MCP gateway usage doc and changelog entries"
 
 - [ ] **Step 1: 服务器 data/.env 写入 API Key**
 
-ssh 上服务器，在 `/opt/daily_stock_analysis/data/.env`（权限 600）追加 `MCP_API_KEYS=<为每个对接方生成的随机 key:label>`（key 用 `openssl rand -hex 24` 生成；**不回显明文、不写日志、不提交 git**）。
+ssh 上服务器，在 `/opt/daily_stock_analysis/data/.env`（权限 600）追加 `MCP_API_KEYS=<为每个对接方生成的随机 key:label>`（key 用 `openssl rand -hex 24` 生成；**不回显明文、不写日志、不提交 git**）。注意：key 改动**必须靠 Step 2 重建容器生效**，WebUI 热重载不更新。
 
 - [ ] **Step 2: 重建容器使配置生效**
 
@@ -1414,11 +1536,11 @@ cd /opt/daily_stock_analysis && docker compose -f docker/docker-compose.yml up -
 - [ ] **Step 4: 生产端到端验收**
 
 ```bash
-# 无 key 应 401
-curl -s -o /dev/null -w "%{http_code}\n" -X POST https://a-stock.tech-monthly.online/mcp
-# 带 key 走标准 MCP initialize/tools.list（用 mcp 客户端或如下原始 JSON-RPC 探测）
+# 无 key 应 401，且响应体应为鉴权中间件固定体 {"error":"unauthorized"}
+curl -s -w "\n%{http_code}\n" -X POST https://a-stock.tech-monthly.online/mcp
 ```
-用一个真实 MCP 客户端（如 Claude/Cursor 配置该地址 + Bearer key）确认能发现 30 个工具并成功调用 `get_realtime_quote`。
+确认 401 的 body 是 `{"error":"unauthorized"}`（中间件返回），以区分"鉴权拦截 401"与"SDK 解析失败 4xx"——只有前者才证明鉴权链生效。
+然后用一个真实 MCP 客户端（如 Claude/Cursor 配置该地址 + Bearer key）确认能发现 30 个工具并成功调用 `get_realtime_quote`。
 
 - [ ] **Step 5: 更新维护记忆**
 
@@ -1426,7 +1548,23 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://a-stock.tech-monthly.on
 
 ---
 
-## Self-Review（写完计划后自查，已执行）
+## 风险点与开放问题（prd-reviewer 提出，执行/验收时关注）
+
+**已通过计划内手段缓解的风险：**
+- **BaseHTTPMiddleware 包裹 `/mcp` 子应用的兼容性** → Task 9 Step 7 进程内 initialize 端到端测试在本地即可暴露，并给了回退方案（把 mount 移到 auth 中间件之前）。
+- **SDK 版本 API 漂移** → Task 1 Step 3 装饰器签名探针 + `mcp>=1.9.0,<2` 版本上限。
+- **config 读取时机错误** → Task 8 重写为"声明 + `_load_from_env` 注入"两处同步 + 真读环境变量的测试。
+
+**需用户决策的开放问题（AI 无法自判，验收前请确认）：**
+1. **`json_response=True` + `stateless=True` 是否满足目标 MCP 客户端？** 选 json_response 是为规避 Cloudflare 对长连 SSE 的限制；但部分 MCP 客户端默认期望 SSE。Task 9 Step 7 的本地 initialize 测试能验证协议层可用，但**真实客户端（Claude/Cursor）兼容性需你在 Task 11 验收时确认**。若不兼容，回退为 `json_response=False`（SSE）并在 Nginx 关闭 `/mcp` 的 `proxy_buffering`。
+2. **`mcp` 精确版本**：已钉 `>=1.9.0,<2`；若你希望完全可复现，Task 1 安装后把 `pip show mcp` 的实际版本号回填为精确 `==` 钉死。
+3. **Nginx `/mcp` 是否一步到位关 `proxy_buffering`**：Task 11 Step 3 已给 `proxy_buffering off`（对 json_response 非必需，切回 SSE 时必需），保留即可，无需额外动作。
+
+---
+
+## Self-Review（写完计划后自查 + prd-reviewer 审查意见已吸收）
+
+> **prd-reviewer 审查吸收记录（2026-06-03）**：3 个阻塞项（config 模式、A 股守卫、无重名断言）+ 4 个重要项（端到端测试、复用 manager 单例、装饰器探针、key 重建说明）+ 4 个改进项（精确 16 断言、dispatch 先查在不在、dragon_tiger 映射注记、curl 401 区分）+ 版本钉死，**全部已合入上文对应任务**；3 个开放问题列入上节供用户决策。
 
 **1. Spec 覆盖：**
 - MCP over Streamable HTTP 挂 /mcp → Task 5/9 ✓
@@ -1441,6 +1579,6 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://a-stock.tech-monthly.on
 - 铁律不触动 + ci_gate → Task 3/10 ✓
 - 同步上游保留登记 → Task 11 Step 5 ✓
 
-**2. Placeholder 扫描：** 各 code step 均含完整代码；Task 8 config 字段标注"示意，须对齐实际配置类风格"并先读模式（因 config.py 结构未逐行核实），属合理的实现指引而非占位。
+**2. Placeholder 扫描：** 各 code step 均含完整代码。Task 8 config 已逐行核实（`Config`@dataclass L602、`parse_env_bool` L137、`tushare_token` 两处模式 L621/L1421、`reset_instance` L2342）并给出精确两处改法，不再是示意。Task 3 的 `normalize_stock_code`(L68)/`_market_tag`(L206) 已核实存在。
 
 **3. 类型一致性：** `to_mcp_tool()`/`to_mcp_tools()`、`build_mcp_registry()`/`_dispatch()`/`get_mcp_session_manager()`/`build_mcp_asgi_app()`、`MCPAuthMiddleware`/`parse_api_keys`/`load_mcp_api_keys`、`NoopRateLimiter.allow`、`ALL_DATASET_TOOLS`、`_handle_single_code_df` 等命名跨任务一致。
