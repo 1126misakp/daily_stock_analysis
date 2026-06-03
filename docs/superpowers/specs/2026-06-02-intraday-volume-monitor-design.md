@@ -33,7 +33,7 @@
 | 缩量阈值 | 量比 ≤ **0.5**（可配） |
 | 冷却/去重 | **同股 + 同类型，当日仅首次**（放量、缩量分别计） |
 | 推送形式 | **每轮合并成一条飞书汇总**；本轮无异动则不推 |
-| 推送渠道 | 现有 `NotificationService`（飞书群机器人 webhook） |
+| 推送渠道 | 现有 `NotificationService().send(content)`（**不带 route_type**，与 `send_daily_report` 一致，发往全部已配置渠道=飞书；生产未配 `NOTIFICATION_*_CHANNELS`） |
 | 启停与可见性 | 纯后台：`data/.env` 开关 + 参数；触发即推飞书 |
 | 运行时段 | 交易日连续竞价 + 尾盘集合竞价（`MarketPhase ∈ {INTRADAY, CLOSING_AUCTION}`） |
 
@@ -90,7 +90,7 @@
 ### 4.3 "当前根"的选取（避免用未走完的 bar 误判）
 - TickFlow 盘中返回的最后一根可能是"正在累积、未走完"的 5m bar，量偏小 → 会误报缩量。
 - 规则：取**倒数第二根**（最后一根已完整收盘的 5m bar）作为"当前根"。即每轮判定的是"刚刚走完的那 5 分钟"。这与 5 分钟扫描频率天然对齐。
-- 边界：尾盘最后一根（`14:55–15:00`）在收盘后那一轮（CLOSING_AUCTION/刚转 POSTMARKET 的最后一次 INTRADAY 轮）能被覆盖到；若 POSTMARKET 已不在运行时段则可能漏最后一根，属可接受取舍（不为最后一根单独加逻辑，YAGNI）。
+- 边界：尾盘最后一根（`14:55–15:00`）要到 15:00 之后才"已收"，而那时市场阶段已是 `POSTMARKET`（不在运行时段），故这根**必然不被覆盖**。这是明确的已知取舍（不为最后一根单独加逻辑，YAGNI）；若用户在意尾盘放量需另行扩展运行时段。
 
 ### 4.4 判定（detector，纯函数）
 ```
@@ -120,7 +120,7 @@ else:                   signal = NORMAL
 | `infer_market_phase` 返回 UNKNOWN | 视为不在运行时段，跳过本轮（fail-closed，不误推） |
 | 某股 `get_intraday_kline` 返回 None / 空 | 跳过该股，计入 skipped，不影响其它股 |
 | 基线数据不足 | 该 slot 基线 None → 跳过该股该轮 |
-| TickFlow 429 限流 | 轮内**串行**取数（标的数远低于 60/min，正常不触发）；若仍收到 429：捕获并按错误中的等待提示 sleep 后重试该股一次，再失败则跳过该股（不拖垮整轮）|
+| TickFlow 429 限流 | **监控器不处理**。TickFlow 数据源层 `_call_with_intraday_retry` 已对分钟K做限流/瞬时失败重试，失败后**降级返回 None**；manager 层亦吞异常返回 None。故监控器收不到 429 异常，统一按"返回 None → 跳过该股（skipped）"处理。轮内**串行**取数使标的数远低于 60/min，正常不触发限流。**严禁**在监控器内自行重试或去 patch 数据源层（违反铁律）。|
 | 飞书推送失败 | `send()` 返回 False → 记日志告警；**已加入 already_alerted 的项不回滚**（避免下一轮重推刷屏），当日不再补推该股该类型 |
 | 监控器内部异常 | `run_once()` 整体 try/except 包裹，异常只记日志、返回空统计，绝不让后台任务崩溃影响 analyzer 主调度（与 alert_worker 同纪律）|
 | 标的解析失败（portfolio 异常） | 退化为仅 STOCK_LIST；portfolio 读取异常不阻断监控 |
