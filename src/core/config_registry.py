@@ -79,6 +79,11 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     "USE_PROXY",
     "PROXY_HOST",
     "PROXY_PORT",
+    # MCP 工具中转站：安全/运维配置，不入 Web UI 设置页（key 改动需重建容器生效，
+    # 鉴权中间件在进程启动时固化 key，WebUI 热重载不会更新，详见 docs/mcp-gateway.md）。
+    "MCP_API_KEYS",
+    "MCP_DNS_REBINDING_PROTECTION",
+    "MCP_ALLOWED_HOSTS",
 }
 
 _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {

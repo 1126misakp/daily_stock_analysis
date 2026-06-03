@@ -174,12 +174,40 @@ async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
     app.state.system_config_service = SystemConfigService()
     _schedule_stock_index_background_refresh(app, "startup")
-    from api.mcp.server import get_mcp_session_manager
+
+    # MCP 工具中转站 session manager：在一个专用后台任务里跑 run()，让其 anyio
+    # task group 的 cancel scope 在「同一个任务」内进出。这样既适配生产 uvicorn，
+    # 又能容忍把 lifespan startup/shutdown 调度到不同任务的测试夹具（如本仓库
+    # threadless TestClient 用两次 run_until_complete 进出 lifespan）——否则会触发
+    # "Attempted to exit cancel scope in a different task than it was entered in"。
+    # 每个 lifespan 周期重建 session manager：run() 是一次性的，重置后本周期可独立 run()，
+    # 避免测试里多次进出 lifespan 复用进程单例导致第二次 run() 报错（详见 reset 函数注释）。
+    from api.mcp.server import get_mcp_session_manager, reset_mcp_session_manager
+    reset_mcp_session_manager()
     session_manager = get_mcp_session_manager()
-    try:
+    mcp_started = asyncio.Event()
+    mcp_stop = asyncio.Event()
+
+    async def _run_mcp_session_manager():
         async with session_manager.run():
-            yield
+            mcp_started.set()
+            await mcp_stop.wait()
+
+    mcp_task = asyncio.create_task(_run_mcp_session_manager())
+    # 等待「就绪」或「任务提前结束（异常）」，二者先到为准——若 run() 启动即失败，
+    # 在此surface 异常，避免 mcp_started 永不 set 导致 await 永久挂死。
+    started_wait = asyncio.ensure_future(mcp_started.wait())
+    done, _pending = await asyncio.wait(
+        {mcp_task, started_wait}, return_when=asyncio.FIRST_COMPLETED)
+    if mcp_task in done:
+        started_wait.cancel()
+        mcp_task.result()  # 启动期异常在此重新抛出
+    try:
+        yield
     finally:
+        mcp_stop.set()
+        with suppress(asyncio.CancelledError):
+            await mcp_task
         refresh_task = getattr(app.state, "stock_index_refresh_task", None)
         if refresh_task is not None and not refresh_task.done():
             refresh_task.cancel()

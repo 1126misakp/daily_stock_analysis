@@ -110,7 +110,10 @@ def _security_settings() -> Optional[TransportSecuritySettings]:
 
 
 def get_mcp_session_manager() -> StreamableHTTPSessionManager:
-    """单例 SessionManager（lifespan run() 与挂载 handle_request 共用同一个）。"""
+    """当前进程的 SessionManager（lifespan run() 与挂载 handle_request 共用同一个）。
+
+    挂载的 handle_request 在「请求时」读取本函数，故 lifespan 启动时若先
+    reset_mcp_session_manager() 重建，请求端会自动跟随到新实例。"""
     global _server, _session_manager
     if _session_manager is None:
         _server = _build_server()
@@ -122,6 +125,18 @@ def get_mcp_session_manager() -> StreamableHTTPSessionManager:
             security_settings=_security_settings(),
         )
     return _session_manager
+
+
+def reset_mcp_session_manager() -> None:
+    """丢弃当前 SessionManager/Server 单例，下次 get 时重建。
+
+    StreamableHTTPSessionManager.run() 是「一次性」的（内部 _has_started 守卫，重复
+    run 会抛 RuntimeError）。生产进程只有一次 lifespan、一次 run()，本无影响；但测试里
+    会多次 create_app() + 进出 lifespan 复用同一进程单例，导致第二次 run() 报错。
+    lifespan 启动时调用本函数，使每个 lifespan 周期都拿到全新可 run 的实例。"""
+    global _server, _session_manager
+    _server = None
+    _session_manager = None
 
 
 def build_mcp_asgi_app():
