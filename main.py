@@ -975,6 +975,32 @@ def main() -> int:
                     "name": "agent_event_monitor",
                 })
 
+            if getattr(config, 'intraday_volume_monitor_enabled', False):
+                from src.services.intraday_volume_monitor import IntradayVolumeMonitor
+
+                iv_interval_minutes = max(
+                    1, getattr(config, 'intraday_volume_monitor_interval_minutes', 5)
+                )
+                intraday_volume_monitor = IntradayVolumeMonitor(
+                    config_provider=_reload_runtime_config
+                )
+
+                def intraday_volume_task():
+                    stats = intraday_volume_monitor.run_once()
+                    if stats.get("hits"):
+                        logger.info(
+                            "[IntradayVolume] 本轮命中 %d 条（已推送=%d）",
+                            stats["hits"],
+                            stats.get("notified", 0),
+                        )
+
+                background_tasks.append({
+                    "task": intraday_volume_task,
+                    "interval_seconds": iv_interval_minutes * 60,
+                    "run_immediately": True,
+                    "name": "intraday_volume_monitor",
+                })
+
             run_with_schedule(
                 task=scheduled_task,
                 schedule_time=config.schedule_time,
