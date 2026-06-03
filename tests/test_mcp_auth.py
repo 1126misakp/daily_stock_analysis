@@ -4,6 +4,7 @@ import asyncio
 import unittest
 
 from api.mcp.auth import MCPAuthMiddleware, parse_api_keys
+from api.mcp.rate_limit import NoopRateLimiter
 
 
 class _Spy:
@@ -60,6 +61,13 @@ class TestAuthMiddleware(unittest.TestCase):
         status = _run(mw, [(b"authorization", b"Bearer anything")])
         self.assertEqual(status, 401)
         self.assertFalse(spy.called)
+
+
+class TestRateLimitStub(unittest.TestCase):
+    def test_noop_allows_everything(self):
+        rl = NoopRateLimiter()
+        self.assertTrue(rl.allow("any-key"))
+        self.assertTrue(rl.allow(""))
 
 
 if __name__ == "__main__":
