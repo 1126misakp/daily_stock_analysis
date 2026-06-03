@@ -7,6 +7,22 @@
 
 ---
 
+## 0. 实施前设计修订（2026-06-03，写 plan 时核实代码后追加）
+
+写实施计划时逐一核实了底层方法，确认两处需修订（用户已确认方向）：
+
+1. **8 个 granular 工具中 7 个需在 `data_provider/base.py` 新增薄路由方法**
+   核实发现 manager（`DataFetcherManager`）只暴露 `*_context` 聚合方法与市场/盘中方法；财务三表、质押、回购、增减持、解禁这些 **granular 方法只存在于 `tushare_fetcher` 层，manager 无 routed 版本**。为铁律合规地暴露，需在 `base.py` 为这 7 个能力各加一个**只读薄路由方法**，照搬现有 `get_limit_up_pool` / `get_belong_boards` 的 `for fetcher in self._fetchers: if hasattr(...)` 优先级遍历（Tushare 先 → akshare 末位）。
+   - 涉及方法：`get_income_statement`、`get_cashflow_statement`、`get_fina_indicator`、`get_pledge_detail`、`get_repurchase`、`get_holder_trade`、`get_share_float`。
+   - **铁律边界澄清**：这些是**新增**的、沿用同一条 `_fetchers` 优先级链的只读 pass-through，**不改动任何现有路由/优先级**，不把 akshare 提为主力、不把 Tushare/TickFlow 降级。因此与数据源铁律一致。由 `ci_gate.sh` + 生产烟雾测试护航。
+
+2. **`get_price_percentile` 取消，替换为 `get_risk_assessment`**
+   核实发现 `get_percentile_price` 只是某方法内的嵌套局部函数，并非独立可调用方法。改用 manager 已 routed 的 `get_risk_context(stock_code)`（含估值/风险/历史分位，Tushare 主力 → akshare 兜底）暴露为 `get_risk_assessment` 工具，**无需改 base.py**。
+
+修订后：MCP 工具仍为 **30 个**（镜像 14 + 新增 16）；需新增 base.py 薄路由方法 **7 个**；下文第 4、5、6 节中 `get_price_percentile` 一律以 `get_risk_assessment` 为准。
+
+---
+
 ## 1. 背景与目标
 
 ### 1.1 用户诉求
