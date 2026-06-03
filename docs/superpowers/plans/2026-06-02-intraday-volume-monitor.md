@@ -685,13 +685,13 @@ git commit -m "feat(intraday-volume): universe 自选∪持仓标的解析"
 
 设计要点（实现时遵守）：
 - 构造参数：`config_provider`（无参 callable，返回最新 `Config`，用于热读配置），可选注入 `manager` / `notifier` / `phase_fn` / `now_fn`（便于测试）。
-- `phase_fn(now)` 默认 `lambda now: infer_market_phase("CN", now)`；`now_fn()` 默认 `lambda: get_market_now("CN")`。
+- `phase_fn(now)` 默认 `lambda now: infer_market_phase("cn", now)`；`now_fn()` 默认 `lambda: get_market_now("cn")`。
 - 运行时段：`phase ∈ {MarketPhase.INTRADAY, MarketPhase.CLOSING_AUCTION}` 才扫描，否则返回零统计。
 - 跨交易日重置：`now_fn().date()` 变化时，`baseline_provider.reset()` + 清空当日去重集合。
 - "当前根"：对每只股票拉 `get_intraday_kline(code, "5m", count=50)`，取 `iloc[-2]`（最后一根**已收**的 bar）；要求该 bar 的日期 == 当日市场日期，否则跳过（本会话尚无已收 bar）。
 - 去重：内存 `set` of `(code, signal_type)`，当日仅首次；已加入即便推送失败也不回滚。
 - 推送：本轮有命中才 `NotificationService().send(content)`（**不带 route_type**，与 `send_daily_report` 一致，发往全部已配置渠道=飞书）。
-- 时区：`now_fn` 生产返回 **tz-aware**（`get_market_now("CN")`，Asia/Shanghai），但 monitor 仅用 `now.strftime(...)` 取字符串、不与 naive 时间做减法；如未来要算时间差需先统一时区。
+- 时区：`now_fn` 生产返回 **tz-aware**（`get_market_now("cn")`，Asia/Shanghai），但 monitor 仅用 `now.strftime(...)` 取字符串、不与 naive 时间做减法；如未来要算时间差需先统一时区。
 - 429：**不处理**。TickFlow 内部已重试并在失败后降级返回 None，monitor 收不到 429；统一按"返回 None=跳过该股(skipped)"，不得自行重试或改数据源层。
 
 - [ ] **Step 1: 写失败测试**
@@ -877,8 +877,8 @@ class IntradayVolumeMonitor:
         self._config_provider = config_provider
         self._manager = manager
         self._notifier = notifier
-        self._phase_fn = phase_fn or (lambda now: infer_market_phase("CN", now))
-        self._now_fn = now_fn or (lambda: get_market_now("CN"))
+        self._phase_fn = phase_fn or (lambda now: infer_market_phase("cn", now))
+        self._now_fn = now_fn or (lambda: get_market_now("cn"))
 
         cfg = config_provider()
         self._baseline = BaselineProvider(

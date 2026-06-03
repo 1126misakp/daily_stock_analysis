@@ -122,6 +122,30 @@ class MonitorTestCase(unittest.TestCase):
         self.assertEqual(stats["hits"], 1)  # 000725 仍命中
         self.assertEqual(stats["errors"], 1)  # 600036 计入错误
 
+    def test_default_phase_fn_uses_lowercase_market_not_blocked(self) -> None:
+        """回归：不注入 phase_fn，走真实 infer_market_phase('cn')。
+
+        防止市场码写成大写 'CN' 导致 infer_market_phase 返回 UNKNOWN、
+        被时段 gate 全挡（单测注入 phase_fn 会掩盖此 bug）。
+        注入一个已知交易日盘中时刻（2026-06-03 周三 10:30），真实日历应判为 INTRADAY。
+        """
+        cfg = _cfg()
+        manager = MagicMock()
+        manager.get_intraday_kline.return_value = _live_df("2026-06-03", 3000)
+        notifier = MagicMock()
+        notifier.send.return_value = True
+        monitor = IntradayVolumeMonitor(
+            config_provider=lambda: cfg,
+            manager=manager,
+            notifier=notifier,
+            # 故意不注入 phase_fn，使用默认 infer_market_phase(_MARKET, now)
+            now_fn=lambda: datetime(2026, 6, 3, 10, 30, 0),
+        )
+        monitor._baseline.get_slot_baseline = MagicMock(return_value=1000.0)
+        stats = monitor.run_once()
+        # 若市场码错误(UNKNOWN)，会被时段 gate 挡掉 → scanned=0；正确('cn')应真正扫描
+        self.assertGreater(stats["scanned"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

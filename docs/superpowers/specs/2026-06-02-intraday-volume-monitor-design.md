@@ -68,7 +68,7 @@
 
 ### 4.1 一轮 `run_once()` 流程
 ```
-1. 时段判断：infer_market_phase("CN") ∉ {INTRADAY, CLOSING_AUCTION} → 直接 return（空转零成本）
+1. 时段判断：infer_market_phase("cn") ∉ {INTRADAY, CLOSING_AUCTION} → 直接 return（空转零成本）
 2. 解析标的：universe.resolve() → 去重后的股票代码列表 codes
 3. 当日去重集合：从内存当日状态取 already_alerted（key=(code, signal_type)）；若日期变更则重置
 4. 遍历 codes（串行，天然限速）：

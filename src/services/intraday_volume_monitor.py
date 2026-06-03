@@ -18,6 +18,9 @@ from src.services.intraday_volume.universe import resolve_universe
 
 logger = logging.getLogger(__name__)
 
+# 市场码必须用小写 "cn"（见 trading_calendar.MARKET_EXCHANGE 的 key）；
+# 大写 "CN" 会使 infer_market_phase/get_market_now 落到 UNKNOWN/系统时区分支。
+_MARKET = "cn"
 _RUN_PHASES = {MarketPhase.INTRADAY, MarketPhase.CLOSING_AUCTION}
 _LIVE_PROBE_COUNT = 50
 _SIGNAL_LABEL = {SIGNAL_SURGE: "放量", SIGNAL_SHRINK: "缩量"}
@@ -37,8 +40,8 @@ class IntradayVolumeMonitor:
         self._config_provider = config_provider
         self._manager = manager
         self._notifier = notifier
-        self._phase_fn = phase_fn or (lambda now: infer_market_phase("CN", now))
-        self._now_fn = now_fn or (lambda: get_market_now("CN"))
+        self._phase_fn = phase_fn or (lambda now: infer_market_phase(_MARKET, now))
+        self._now_fn = now_fn or (lambda: get_market_now(_MARKET))
 
         cfg = config_provider()
         self._baseline = BaselineProvider(
