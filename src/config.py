@@ -617,6 +617,11 @@ class Config:
     feishu_app_secret: Optional[str] = None
     feishu_folder_token: Optional[str] = None  # 目标文件夹 Token
 
+    # === MCP 工具中转站 ===
+    mcp_api_keys: str = ""
+    mcp_dns_rebinding_protection: bool = False
+    mcp_allowed_hosts: str = ""
+
     # === 数据源 API Token ===
     tushare_token: Optional[str] = None
     tickflow_api_key: Optional[str] = None
@@ -1418,6 +1423,10 @@ class Config:
             feishu_app_id=os.getenv('FEISHU_APP_ID'),
             feishu_app_secret=os.getenv('FEISHU_APP_SECRET'),
             feishu_folder_token=os.getenv('FEISHU_FOLDER_TOKEN'),
+            mcp_api_keys=os.getenv('MCP_API_KEYS', ''),
+            mcp_dns_rebinding_protection=parse_env_bool(
+                os.getenv('MCP_DNS_REBINDING_PROTECTION'), default=False),
+            mcp_allowed_hosts=os.getenv('MCP_ALLOWED_HOSTS', ''),
             tushare_token=os.getenv('TUSHARE_TOKEN'),
             tickflow_api_key=os.getenv('TICKFLOW_API_KEY'),
             finnhub_api_key=os.getenv('FINNHUB_API_KEY') or None,
