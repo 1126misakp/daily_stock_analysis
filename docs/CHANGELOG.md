@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新增 MCP 工具中转站（/mcp，Streamable HTTP），对外开放 30 个数据/新闻/分析工具供其他智能体零胶水调用，API Key 鉴权
 - [新功能] DataFetcherManager 新增 7 个只读 granular 路由方法（财务三表/质押/回购/增减持/解禁），沿用既有数据源优先级链
 - [文档] 新增 docs/mcp-gateway.md 与 MCP 配置项说明
+- [文档] 新增 docs/mcp-integration-guide.md：面向大模型/Agent 的 MCP 接入指南（30 工具目录、参数、市场范围、工作流与调用示例）
 - [新功能] 新增 Agent 工具 `get_intraday_volume`：让「问股」技术面分析获取单只 A 股盘中 5 分钟实时量能（最新 bar 量比、放量/缩量/正常判定、今日累计量、最近几根 bar），口径与盘中飞书告警一致；已纳入技术面 Agent 工具白名单，非盘中时段返回最近可得数据并标注状态。
 - [改进] 盘中量能飞书推送在股票代码后补充股票名称（取名失败时退化为仅代码）。
 - [新功能] 新增盘中分钟级量能监控：交易时段每 N 分钟扫描自选股∪持仓股(仅A股)的 5 分钟成交量，对比近 20 交易日同时段均量识别放量(≥2.0x)/缩量(≤0.5x)，当日同股同类型首次合并推送飞书；默认关闭，经 `INTRADAY_VOLUME_MONITOR_ENABLED` 等 .env 配置开启。

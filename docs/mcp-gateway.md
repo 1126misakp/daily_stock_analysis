@@ -6,6 +6,7 @@
 
 > 关联设计：`docs/superpowers/specs/2026-06-03-mcp-tool-gateway-design.md`
 > 实施计划：`docs/superpowers/plans/2026-06-03-mcp-tool-gateway.md`
+> **面向大模型/Agent 的接入指南（30 工具目录、参数、工作流、调用示例）：[`mcp-integration-guide.md`](./mcp-integration-guide.md)**
 
 ## 端点
 
