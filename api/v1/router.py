@@ -11,7 +11,7 @@ API v1 路由聚合
 
 from fastapi import APIRouter
 
-from api.v1.endpoints import alerts, analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, screen
+from api.v1.endpoints import alerts, analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, screen, mcp_keys
 
 # 创建 v1 版本主路由
 router = APIRouter(prefix="/api/v1")
@@ -80,4 +80,10 @@ router.include_router(
     screen.router,
     prefix="/screen",
     tags=["Screen"]
+)
+
+router.include_router(
+    mcp_keys.router,
+    prefix="/mcp-keys",
+    tags=["MCP Keys"]
 )
