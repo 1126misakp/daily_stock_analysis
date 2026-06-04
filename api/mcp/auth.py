@@ -26,6 +26,18 @@ def parse_api_keys(raw: str) -> Set[str]:
     return keys
 
 
+def first_api_key(raw: str) -> "str | None":
+    """Return the first key (order-preserving) from a 'k1:l1,k2:l2' string, or None."""
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        key = item.split(":", 1)[0].strip()
+        if key:
+            return key
+    return None
+
+
 def load_mcp_api_keys() -> Set[str]:
     from src.config import get_config
     cfg = get_config()
