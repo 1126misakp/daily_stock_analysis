@@ -640,12 +640,16 @@ class AkshareFundamentalAdapter:
 
     def get_capital_flow(self, stock_code: str, top_n: int = 5) -> Dict[str, Any]:
         """
-        Return stock + sector capital flow.
+        Return per-stock 主力资金流（仅 Tushare moneyflow，akshare 兜底）。
+
+        说明：原先附带的"板块资金流排名"段写死 akshare、市场级全量扫描耗时约 24s，
+        既违背"akshare 末位"铁律、又把 0.3s 就绪的个股资金流一起拖垮，且与独立的
+        get_sector_rankings 工具功能重复，故已移除。板块资金流请改用 get_sector_rankings。
+        ``top_n`` 仅为兼容旧签名而保留，现已不再使用。
         """
         result: Dict[str, Any] = {
             "status": "not_supported",
             "stock_flow": {},
-            "sector_rankings": {"top": [], "bottom": []},
             "source_chain": [],
             "errors": [],
         }
@@ -677,28 +681,7 @@ class AkshareFundamentalAdapter:
                     }
                     result["source_chain"].append(f"capital_stock:{stock_source}")
 
-        sector_df, sector_source, sector_errors = self._call_df_candidates([
-            ("stock_sector_fund_flow_rank", {}),
-            ("stock_sector_fund_flow_summary", {}),
-        ])
-        result["errors"].extend(sector_errors)
-        if sector_df is not None:
-            name_col = next((c for c in sector_df.columns if any(k in str(c) for k in ("板块", "行业", "名称", "name"))), None)
-            flow_col = next((c for c in sector_df.columns if any(k in str(c) for k in ("净流入", "主力", "flow", "净额"))), None)
-            if name_col and flow_col:
-                work_df = sector_df[[name_col, flow_col]].copy()
-                work_df[flow_col] = pd.to_numeric(work_df[flow_col], errors="coerce")
-                work_df = work_df.dropna(subset=[flow_col])
-                top_df = work_df.nlargest(top_n, flow_col)
-                bottom_df = work_df.nsmallest(top_n, flow_col)
-                result["sector_rankings"] = {
-                    "top": [{"name": _safe_str(r[name_col]), "net_inflow": float(r[flow_col])} for _, r in top_df.iterrows()],
-                    "bottom": [{"name": _safe_str(r[name_col]), "net_inflow": float(r[flow_col])} for _, r in bottom_df.iterrows()],
-                }
-                result["source_chain"].append(f"capital_sector:{sector_source}")
-
-        has_content = bool(result["stock_flow"] or result["sector_rankings"]["top"] or result["sector_rankings"]["bottom"])
-        result["status"] = "partial" if has_content else "not_supported"
+        result["status"] = "partial" if result["stock_flow"] else "not_supported"
         return result
 
     def get_dragon_tiger_flag(self, stock_code: str, lookback_days: int = 20) -> Dict[str, Any]:

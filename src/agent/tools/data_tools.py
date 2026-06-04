@@ -654,7 +654,6 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
 
     data = ctx.get("data", {})
     stock_flow = data.get("stock_flow") or {}
-    sector_rankings = data.get("sector_rankings") or {}
     errors = ctx.get("errors") or []
 
     return {
@@ -663,10 +662,6 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
         "main_net_inflow": stock_flow.get("main_net_inflow"),
         "inflow_5d": stock_flow.get("inflow_5d"),
         "inflow_10d": stock_flow.get("inflow_10d"),
-        "sector_rankings": {
-            "top_inflow_sectors": sector_rankings.get("top", [])[:3],
-            "top_outflow_sectors": sector_rankings.get("bottom", [])[:3],
-        },
         "errors": errors,
     }
 
@@ -675,8 +670,8 @@ get_capital_flow_tool = ToolDefinition(
     name="get_capital_flow",
     description=(
         "Get main-force (主力) capital flow data for an A-share stock. "
-        "Returns today's net inflow, 5-day and 10-day cumulative inflows, "
-        "and top sector-level capital flow rankings. "
+        "Returns today's net inflow plus 5-day and 10-day cumulative inflows (Tushare moneyflow). "
+        "For sector-level capital flow rankings, use get_sector_rankings instead. "
         "Only supported for A-share individual stocks (not ETFs, indices, HK, or US stocks)."
     ),
     parameters=[

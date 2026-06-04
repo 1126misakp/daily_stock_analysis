@@ -63,11 +63,9 @@ class TestGetCapitalFlowContract(unittest.TestCase):
         self.assertEqual(result["main_net_inflow"], 1500000.0)
         self.assertEqual(result["inflow_5d"], 8000000.0)
         self.assertEqual(result["inflow_10d"], 15000000.0)
-        self.assertIn("sector_rankings", result)
-        self.assertIn("top_inflow_sectors", result["sector_rankings"])
-        self.assertIn("top_outflow_sectors", result["sector_rankings"])
-        # At most 3 items are returned per ranking list
-        self.assertLessEqual(len(result["sector_rankings"]["top_inflow_sectors"]), 3)
+        # 板块资金流排名已从 capital_flow 移除（改用 get_sector_rankings），
+        # 输出结构不再含 sector_rankings 字段。
+        self.assertNotIn("sector_rankings", result)
         self.assertEqual(result["errors"], [])
 
     def test_not_supported_for_non_cn_or_etf(self) -> None:

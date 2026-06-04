@@ -91,7 +91,7 @@ curl -s -X POST https://a-stock.tech-monthly.online/mcp \
 | `get_daily_history` | 日 K（OHLCV + MA5/10/20），最近 N 天 | `stock_code*`, `days`(默认60) | A/港/美 |
 | `get_stock_info` | 基本面摘要（估值/成长/盈利/机构流向/所属板块/板块排名），紧凑省 token | `stock_code*` | A/港/美 |
 | `get_chip_distribution` | 筹码分布（获利比例/平均成本/90%·70%集中度） | `stock_code*` | A股 |
-| `get_capital_flow` | 主力资金流（今日/5日/10日净流入 + 板块资金榜） | `stock_code*` | A股 |
+| `get_capital_flow` | 主力资金流（今日/5日/10日净流入，Tushare moneyflow；板块资金榜请用 `get_sector_rankings`） | `stock_code*` | A股 |
 | `get_stock_sectors` | 个股所属板块/概念列表 | `stock_code*` | A股 |
 | `get_risk_assessment` | 风险与估值评估（估值水平/历史分位/风险信号） | `stock_code*` | A股 |
 

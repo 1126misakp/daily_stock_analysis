@@ -3408,13 +3408,11 @@ class DataFetcherManager:
             )
 
         stock_flow = payload.get("stock_flow") or {}
-        sector_rankings = payload.get("sector_rankings") or {}
         has_stock_flow = False
         if isinstance(stock_flow, dict):
             has_stock_flow = any(v is not None for v in stock_flow.values())
-        has_sector_rankings = bool(sector_rankings.get("top")) or bool(sector_rankings.get("bottom"))
         adapter_status = str(payload.get("status", "not_supported"))
-        if has_stock_flow or has_sector_rankings:
+        if has_stock_flow:
             capital_flow_status = "ok"
         elif adapter_status == "not_supported":
             capital_flow_status = "not_supported"
@@ -3425,7 +3423,6 @@ class DataFetcherManager:
             capital_flow_status,
             {
                 "stock_flow": payload.get("stock_flow", {}),
-                "sector_rankings": payload.get("sector_rankings", {}),
             },
             self._normalize_source_chain(
                 payload.get("source_chain", []),

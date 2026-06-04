@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 调大 fundamental 数据块超时（`FUNDAMENTAL_FETCH_TIMEOUT_SECONDS` 3→8s、`FUNDAMENTAL_STAGE_TIMEOUT_SECONDS` 8→20s），修复龙虎榜等 Tushare 接口因 3s 超时过短在网络波动下频繁降级的问题。
+- [改进] `get_capital_flow` 移除内部"板块资金流排名"段（原写死 akshare、市场级全量扫描约 24s，违背"akshare 末位"原则且把 0.3s 就绪的个股资金流一起拖垮），现仅返回 Tushare 个股主力净流入（今日/5日/10日），秒级稳定返回；板块资金榜请改用 `get_sector_rankings`。输出结构不再含 `sector_rankings` 字段，个股分析报告的主力资金流表同步去掉两行板块文案。
 - [新功能] WebUI 新增「密钥」页：查看/重置 MCP 中转站 API Key，重置后旧 key 立即失效、新 key 即时生效（无需重建容器），并提供一键复制连接配置
 - [改进] MCP 鉴权改为动态读取 data/.env 的 MCP_API_KEYS（带短 TTL 缓存），支持运行时改 key 免重启
 - [新功能] 新增 MCP 工具中转站（/mcp，Streamable HTTP），对外开放 30 个数据/新闻/分析工具供其他智能体零胶水调用，API Key 鉴权

@@ -74,8 +74,8 @@ class TestCapitalFlowTushareFirst(unittest.TestCase):
         self.assertEqual(res["stock_flow"]["inflow_5d"], 600.0 * 1e4)
         self.assertEqual(res["stock_flow"]["inflow_10d"], 600.0 * 1e4)
         self.assertIn("capital_stock:tushare:moneyflow", res["source_chain"])
-        # 结构键不变
-        self.assertEqual(set(res.keys()), {"status", "stock_flow", "sector_rankings", "source_chain", "errors"})
+        # 板块资金流排名已移除（改用 get_sector_rankings），不再返回 sector_rankings 键
+        self.assertEqual(set(res.keys()), {"status", "stock_flow", "source_chain", "errors"})
 
     @patch.object(AkshareFundamentalAdapter, "_call_df_candidates", return_value=(None, None, []))
     def test_falls_back_to_akshare_when_no_tushare(self, _mock_ak):

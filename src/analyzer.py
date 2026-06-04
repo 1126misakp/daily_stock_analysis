@@ -2863,31 +2863,11 @@ class GeminiAnalyzer:
             if isinstance(capital_flow_data, dict)
             else {}
         )
-        sector_flow = (
-            capital_flow_data.get("sector_rankings", {})
-            if isinstance(capital_flow_data, dict)
-            else {}
-        )
         has_capital_flow = (
             isinstance(stock_flow, dict)
             and any(v is not None for v in stock_flow.values())
-        ) or (
-            isinstance(sector_flow, dict)
-            and (sector_flow.get("top") or sector_flow.get("bottom"))
         )
         if has_capital_flow:
-            top_sectors = sector_flow.get("top", []) if isinstance(sector_flow, dict) else []
-            bottom_sectors = sector_flow.get("bottom", []) if isinstance(sector_flow, dict) else []
-            top_sector_text = "、".join(
-                str(item.get("name", "")).strip()
-                for item in top_sectors[:3]
-                if isinstance(item, dict) and str(item.get("name", "")).strip()
-            ) or "N/A"
-            bottom_sector_text = "、".join(
-                str(item.get("name", "")).strip()
-                for item in bottom_sectors[:3]
-                if isinstance(item, dict) and str(item.get("name", "")).strip()
-            ) or "N/A"
             prompt += f"""
 ### 主力资金流向（操作建议过滤器）
 | 指标 | 数值 | 决策含义 |
@@ -2895,8 +2875,6 @@ class GeminiAnalyzer:
 | 主力净流入 | {stock_flow.get('main_net_inflow', 'N/A')} | 正值偏支持，负值偏压制 |
 | 5日净流入 | {stock_flow.get('inflow_5d', 'N/A')} | 用于判断资金持续性 |
 | 10日净流入 | {stock_flow.get('inflow_10d', 'N/A')} | 用于判断资金持续性 |
-| 资金流入靠前板块 | {top_sector_text} | 板块资金共振参考 |
-| 资金流出靠前板块 | {bottom_sector_text} | 板块风险参考 |
 
 > 资金流向只能作为价格位置的过滤器：接近压力且主力流出时不得追买；接近支撑且未放量跌破时，优先判断为持有观察、震荡或洗盘观察。
 """
