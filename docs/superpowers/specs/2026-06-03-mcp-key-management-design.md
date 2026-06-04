@@ -16,7 +16,8 @@
 - UI 视角始终只有一把 key：
   - **读**：取 `MCP_API_KEYS` 解析后的**首个 key**（`parse_api_keys` 已存在，`api/mcp/auth.py`）作为「当前生效 key」。
   - **重置/首次生成**：`secrets.token_hex(24)` 生成新 key，**整体覆盖** `MCP_API_KEYS`（写 `MCP_API_KEYS=<newkey>`，不带 label，旧 key 一并失效）。
-- 写回用 `ConfigManager.apply_updates(updates, sensitive_keys, mask_token)`（`src/core/config_manager.py:112`，加锁 + 原子 `os.replace` + 失败回退），传 `sensitive_keys={"MCP_API_KEYS"}`；新 key 非掩码、非原值，必落盘。权限保持 600（现有写入逻辑保留文件权限）。
+- 写回用 `ConfigManager.apply_updates(updates, sensitive_keys, mask_token)`（`src/core/config_manager.py:112`，加锁 + 原子 `os.replace` + 失败回退），传 `sensitive_keys={"MCP_API_KEYS"}`；新 key 非掩码、非原值，必落盘。
+- **权限兜底**：`_atomic_upsert` 的 `os.replace` 路径**不保留文件权限**（temp 默认 644 会替换掉 600，这是影响所有 WebUI 配置保存的既有问题，本特性不展开修）。因本特性写的是机密且 `data/.env` 须 600，`MCPKeyService.reset_key()` 在 `apply_updates` 之后**显式 `os.chmod(env_path, 0o600)`** 兜底。
 - key 不写日志、不入 git；仅在端点响应体回传给已登录管理员。
 
 ## 3. 后端
