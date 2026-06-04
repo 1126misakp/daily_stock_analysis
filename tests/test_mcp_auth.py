@@ -37,27 +37,27 @@ class TestParseKeys(unittest.TestCase):
 class TestAuthMiddleware(unittest.TestCase):
     def test_valid_key_passes(self):
         spy = _Spy()
-        mw = MCPAuthMiddleware(spy, {"secret1"})
+        mw = MCPAuthMiddleware(spy, lambda: {"secret1"})
         status = _run(mw, [(b"authorization", b"Bearer secret1")])
         self.assertEqual(status, 200)
         self.assertTrue(spy.called)
 
     def test_missing_key_rejected(self):
         spy = _Spy()
-        mw = MCPAuthMiddleware(spy, {"secret1"})
+        mw = MCPAuthMiddleware(spy, lambda: {"secret1"})
         status = _run(mw, [])
         self.assertEqual(status, 401)
         self.assertFalse(spy.called)
 
     def test_wrong_key_rejected(self):
         spy = _Spy()
-        mw = MCPAuthMiddleware(spy, {"secret1"})
+        mw = MCPAuthMiddleware(spy, lambda: {"secret1"})
         status = _run(mw, [(b"authorization", b"Bearer nope")])
         self.assertEqual(status, 401)
 
     def test_unconfigured_denies_all(self):
         spy = _Spy()
-        mw = MCPAuthMiddleware(spy, set())
+        mw = MCPAuthMiddleware(spy, lambda: set())
         status = _run(mw, [(b"authorization", b"Bearer anything")])
         self.assertEqual(status, 401)
         self.assertFalse(spy.called)
