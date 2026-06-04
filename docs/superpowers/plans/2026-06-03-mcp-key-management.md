@@ -21,6 +21,18 @@
 - 涉及 API 行为变化更 `docs/CHANGELOG.md`（`[Unreleased]` 扁平 `- [类型] 描述`，**禁止** `### 标题`）；新配置项同步 `.env.example`（本计划不新增 env 配置项）。
 - 不写死密钥/域名/端口。
 
+## 执行前必读（本仓库实测约定，避免猜测）
+
+- 前端页面 import 一律 `const X = lazy(() => import('./pages/X'))`（见 `App.tsx`），**勿用静态 default import**。
+- 前端 api 调用一律全前缀 `/api/v1/...`（`API_BASE_URL` 默认 `''`，见 `apps/dsa-web/src/utils/constants.ts:11`），**勿做运行时去前缀判断**。
+- 前端测试框架为 **vitest + @testing-library/react**，jest-dom 已在 `src/setupTests.ts` 全局引入，`toBeInTheDocument` 等可直接用。
+- 侧栏数组实测名 **`NAV_ITEMS`**（`SidebarNav.tsx:26`，`navItems` 仅 `:42` 的局部别名）；标题映射对象实测名 **`TITLES`**（`ShellHeader.tsx:12`）。
+- `ConfigManager.apply_updates` 会对写入键做 `key.upper()`；`MCP_API_KEYS` 全大写安全，**勿引入小写键名**。
+- 本仓库为**已上线生产**：`git pull` 后必须保留 `docker/docker-compose.yml` 的 `env_file`/`ENV_FILE` 本地分叉，部署后跑 `ci_gate` + 数据源铁律烟雾。
+- 只做与本任务直接相关的最小改动，**禁止顺手重构 auth/config/data_provider**（数据源路由有铁律，绝不可触碰）。
+
+> **已为本计划核实的生产事实（无需再问）**：① 源站 nginx `location /` 已 `proxy_set_header X-Forwarded-Proto $scheme;`（`stock.conf:28`）→ `_endpoint()` 得到 `https://域名/mcp`；② server 经 `uvicorn.run("api.app:app", ...)` 启动，**无 `workers=` → 单进程单 worker**，重置端点失效本进程缓存即全局即时生效（无跨 worker 窗口）；③ TTL=3s 仅用于自愈"带外手改 data/.env"，端点重置走 `invalidate()` 同进程立即生效。
+
 ---
 
 ## 文件结构（决定任务拆分）
@@ -119,7 +131,9 @@ class TestMCPKeyService(unittest.TestCase):
         self.assertGreaterEqual(len(new_key), 32)
         # 落盘且整体覆盖（旧 key 不再存在）
         self.assertEqual(svc.get_current_key(), new_key)
-        self.assertNotIn("oldkey", env_path.read_text(encoding="utf-8"))
+        body = env_path.read_text(encoding="utf-8")
+        self.assertNotIn("oldkey", body)
+        self.assertIn("MCP_API_KEYS=", body)  # 键名仍全大写（apply_updates 会 key.upper()）
 
     def test_reset_keeps_permission_600(self):
         svc, env_path = self._service("oldkey")
@@ -165,7 +179,7 @@ from api.mcp.auth import first_api_key
 
 logger = logging.getLogger(__name__)
 
-_KEY_ENV = "MCP_API_KEYS"
+_KEY_ENV = "MCP_API_KEYS"  # 必须全大写：ConfigManager.apply_updates 会对写入键做 key.upper()
 _MASK = "******"
 
 
@@ -366,19 +380,21 @@ def get_key_provider() -> _CachedKeyProvider:
 ```
 
 > 保留现有 `parse_api_keys`、`load_mcp_api_keys`（其它处可能引用），不删除。
+>
+> **正交性说明（勿误改）**：`get_key_provider()` 单例与 `api/app.py` lifespan 每周期调的 `reset_mcp_session_manager()`（`server.py`，只重置 `_server`/`_session_manager`）**互不相干**。`api/app.py` 末尾有模块级 `app = create_app()`，故 `build_mcp_asgi_app()` 在 import 时即跑、`get_key_provider()` 单例此刻创建并**跨 lifespan 周期持续存活**——这正是动态生效的前提。**不要**把 provider 失效接进 lifespan 或 `reset_mcp_session_manager()`。
 
 - [ ] **Step 4: 适配旧测试 tests/test_mcp_auth.py**
 
-旧测试用 `MCPAuthMiddleware(spy, {"secret1"})`（冻结 set），改为 lambda provider。修改 `tests/test_mcp_auth.py` 中四处构造：
+旧测试把冻结 set 直接传给中间件，新签名要 callable。`tests/test_mcp_auth.py` 共改 **4 处、两类 pattern**（注意 `set()` 那处 pattern 不同，replace_all 只匹配 `{"secret1"}` 会漏）：
 
 ```python
-# 将每处  MCPAuthMiddleware(spy, {"secret1"})  改为：
+# 3 处（第 41、47、55 行）：MCPAuthMiddleware(spy, {"secret1"}) →
 mw = MCPAuthMiddleware(spy, lambda: {"secret1"})
-# 将       MCPAuthMiddleware(spy, set())         改为：
+# 1 处（第 60 行）：MCPAuthMiddleware(spy, set()) →
 mw = MCPAuthMiddleware(spy, lambda: set())
 ```
 
-（`TestParseKeys`/`TestRateLimitStub` 不变。）
+（`TestParseKeys`/`TestRateLimitStub` 不动。）改完肉眼逐一确认无遗漏的裸 `set`/`dict` 实参，否则会 `TypeError: 'set' object is not callable`。
 
 - [ ] **Step 5: 运行测试确认通过**
 
@@ -448,6 +464,8 @@ def build_mcp_asgi_app():
 ```
 
 （`_drive()` 与断言不变；provider 经 `ConfigManager()` 解析 `ENV_FILE`→临时文件读到 `testkey`。）
+
+> 注：保留 `Config.reset_instance()` 仅为隔离 `_security_settings()` 等**仍读 Config 单例**的链路（`server.py` 的 `_security_settings` 经 `get_config()`）；鉴权已改为**读文件、不依赖 Config**，故 reset_instance 对鉴权不再起作用，但**勿删**——删了会影响其它 Config 依赖在测试间的隔离。provider 经 `get_key_provider().invalidate()` 后下一次 `__call__` 走 `ConfigManager()`→`ENV_FILE` 读 `testkey`。
 
 - [ ] **Step 3: 运行测试确认通过**
 
@@ -615,17 +633,17 @@ export type McpKeyInfo = {
 };
 
 export async function getMcpKey(): Promise<McpKeyInfo> {
-  const { data } = await apiClient.get('/api/v1/mcp-keys');
-  return toCamelCase<McpKeyInfo>(data);
+  const r = await apiClient.get<Record<string, unknown>>('/api/v1/mcp-keys');
+  return toCamelCase<McpKeyInfo>(r.data);
 }
 
 export async function resetMcpKey(): Promise<McpKeyInfo> {
-  const { data } = await apiClient.post('/api/v1/mcp-keys/reset');
-  return toCamelCase<McpKeyInfo>(data);
+  const r = await apiClient.post<Record<string, unknown>>('/api/v1/mcp-keys/reset');
+  return toCamelCase<McpKeyInfo>(r.data);
 }
 ```
 
-> 先 `sed -n '1,15p' apps/dsa-web/src/api/index.ts` 确认 `apiClient` 默认导出与 `baseURL`；若 `baseURL` 已含 `/api`，则上面路径相应去掉前缀 `/api` 改 `/v1/mcp-keys`（以现有 `api/screen.ts`/`api/stocks.ts` 的实际调用前缀为准，照搬同款写法）。
+> 已实测：`API_BASE_URL` 默认 `''`（`apps/dsa-web/src/utils/constants.ts:11`），现有所有 api 文件均用**全前缀 `/api/v1/...`**（见 `api/screen.ts:66`）。**直接照搬 `/api/v1` 前缀，无需运行时判断**。
 
 - [ ] **Step 2: 类型检查**
 
@@ -793,7 +811,7 @@ export default function MCPKeyPage() {
 
 - [ ] **Step 4: 注册侧栏项**
 
-在 `apps/dsa-web/src/components/layout/SidebarNav.tsx`：import 区把 `lucide-react` 增加 `KeyRound`，`navItems` 在 `settings` 之前插入：
+在 `apps/dsa-web/src/components/layout/SidebarNav.tsx`：import 区把 `lucide-react` 增加 `KeyRound`，在实测常量 **`NAV_ITEMS`（`SidebarNav.tsx:26`）**数组中、`settings` 项之前插入：
 
 ```tsx
   { key: 'mcp-keys', label: '密钥', to: '/mcp-keys', icon: KeyRound },
@@ -801,29 +819,27 @@ export default function MCPKeyPage() {
 
 - [ ] **Step 5: 注册路由与标题**
 
-`apps/dsa-web/src/App.tsx`：在 `<Route path="/settings" .../>` 同处加：
+`apps/dsa-web/src/App.tsx`：页面一律 **lazy import**（与现有 `const SettingsPage = lazy(() => import('./pages/SettingsPage'))` 同处），在 lazy 声明区加：
+
+```tsx
+const MCPKeyPage = lazy(() => import('./pages/MCPKeyPage'));
+```
+
+并在 `<Route path="/settings" .../>`（`App.tsx:84`）同一父 `<Route>` 内、其前/后加：
 
 ```tsx
         <Route path="/mcp-keys" element={<MCPKeyPage />} />
 ```
 
-并在文件顶部 import：`import MCPKeyPage from './pages/MCPKeyPage';`（照现有页面 import 风格）。
-
-`apps/dsa-web/src/components/layout/ShellHeader.tsx`：在路由标题映射对象中加：
+`apps/dsa-web/src/components/layout/ShellHeader.tsx`：在实测标题映射对象 **`TITLES`（`ShellHeader.tsx:12`）**中加：
 
 ```tsx
   '/mcp-keys': { title: '密钥', description: 'MCP 中转站 API Key 查看与重置' },
 ```
 
-- [ ] **Step 6: 适配 SidebarNav.test.tsx**
+- [ ] **Step 6: 确认 SidebarNav.test.tsx 无需改动**
 
-`SidebarNav.test.tsx` 断言了前若干项 href（`hrefs.slice(0, 4)` === `['/', '/chat', '/screening', '/portfolio']`）。新增「密钥」插在 `settings` 前、位置在前 4 之后，不影响该断言。若该测试另有「项数」或「包含 settings」断言，按实际补一条 `/mcp-keys` 存在性断言：
-
-```tsx
-    expect(hrefs).toContain('/mcp-keys');
-```
-
-> 先 `sed -n '1,60p' apps/dsa-web/src/components/layout/__tests__/SidebarNav.test.tsx` 看断言细节，仅在被新增项破坏处最小改动。
+实测 `SidebarNav.test.tsx` 仅断言 `hrefs.slice(0, 4)` === `['/', '/chat', '/screening', '/portfolio']`（:40）与按 name 取链接（`选股/告警/退出` 等），**无项数断言、无 settings 断言**。新增「密钥」插在 `settings` 前、位置在前 4 之后，**不破坏任何现有断言 → 本文件无需改动**。（可选正向覆盖：新增独立一条 `expect(hrefs).toContain('/mcp-keys');`，非必需，不强求。）先 `sed -n '1,60p' .../SidebarNav.test.tsx` 复核确无破坏，再跳过。
 
 - [ ] **Step 7: 运行前端测试 + lint + build**
 
@@ -947,7 +963,7 @@ git push origin main
 
 - [ ] **Step 2: 服务器部署（前端构建随镜像）**
 
-scp 一个部署脚本或直接 ssh 执行：备份 data/.env → `git pull --ff-only` → `docker compose -f docker/docker-compose.yml up -d --build`（**前端产物在镜像构建阶段生成**，故必须 `--build`）→ 等 server healthy。
+scp 部署脚本或 ssh 执行：备份 `data/.env` → `git pull --ff-only` → **立即确认 `docker/docker-compose.yml` 仍含 `env_file: ../data/.env` 与 `environment: ENV_FILE=/app/data/.env`**（被上游覆盖则恢复，否则 provider 读不到 `data/.env`，认证与动态生效都失效）→ `docker compose -f docker/docker-compose.yml up -d --build`（**前端产物在镜像构建阶段生成，必须 `--build`**）→ 等 server healthy。
 
 - [ ] **Step 3: 生产验收**
 
@@ -958,6 +974,8 @@ scp 一个部署脚本或直接 ssh 执行：备份 data/.env → `git pull --ff
 ```
 确认：WebUI 密钥页正常；`/mcp` 旧 key 重置后即 401、新 key 200；两容器 healthy；数据源/分析功能不受影响。
 
+> 顺带核 `endpoint` 协议：`curl -s https://域名/api/v1/mcp-keys`（带登录 cookie）返回的 `endpoint` 应为 `https://域名/mcp`。已确认源站 nginx `stock.conf:28` 有 `proxy_set_header X-Forwarded-Proto $scheme;`，故应为 https；若意外为 http，再查该 header。
+
 - [ ] **Step 4: 更新维护记忆**
 
 在自动记忆 `dsa-mcp-gateway` 追加：key 现支持 WebUI 查看/重置 + 动态生效；新增本地分叉文件（`mcp_key_service.py`、`mcp_keys.py`、前端密钥页等）须随同步上游保留；记录「`apply_updates` 不保权限、reset 显式 chmod 600」这一坑。
@@ -966,7 +984,7 @@ scp 一个部署脚本或直接 ssh 执行：备份 data/.env → `git pull --ff
 
 ## 风险点与未验证项
 
-- **多 worker**：若 server 以多 worker 运行，重置端点只失效自身 worker 缓存，其它 worker 靠 ≤3s TTL 自愈（生产 serve-only 通常单进程，影响可忽略）。
+- **多 worker**：已核实生产 `uvicorn.run("api.app:app", ...)` **无 `workers=` → 单进程**，重置端点失效本进程缓存即全局即时生效，无跨 worker 窗口。（若将来改多 worker，其它 worker 靠 ≤3s TTL 自愈。）
 - **`apply_updates` 不保留 600**：本计划已用 reset 后显式 chmod 600 兜底；其它配置保存路径的同类问题不在本计划范围。
 - **前端 baseURL 前缀**：Task 5 需按现有 `api/*.ts` 实际调用前缀对齐（`/api/v1` vs `/v1`），照搬同款写法。
 - **真实 MCP 客户端**：动态生效已由本地 HTTP 烟雾（Task 8）与单测验证；真实 Claude/Cursor 重连体验建议上线后顺手确认。
