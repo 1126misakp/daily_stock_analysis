@@ -28,11 +28,10 @@
 | `MCP_DNS_REBINDING_PROTECTION` | 是否开启 MCP 传输层 DNS rebinding / Host 校验（部署在受信 Nginx 后默认 false） | `false` |
 | `MCP_ALLOWED_HOSTS` | 开启校验时允许的 Host/Origin（逗号分隔），如 `a-stock.tech-monthly.online` | 空 |
 
-> ⚠️ **`MCP_API_KEYS` 改动后必须重建容器才生效**：
-> ```bash
-> cd /opt/daily_stock_analysis && docker compose -f docker/docker-compose.yml up -d
-> ```
-> 鉴权中间件在进程启动时（`app = create_app()` 模块级实例化）把 key 集合固化进实例，**WebUI 设置页的热重载不会更新已固化的 MCP key**。
+> ✅ **key 现在动态生效（无需重建容器）**：鉴权中间件每请求经短 TTL 缓存（≈3s）实时读 `data/.env` 的 `MCP_API_KEYS`。
+> - **推荐**：登录 WebUI →左侧 **「密钥」页**查看/重置 key，**重置即时生效**（旧 key 立刻失效、新 key 立刻可用，同进程无延迟），并可一键复制连接配置。详见 [`mcp-integration-guide.md`](./mcp-integration-guide.md)。
+> - 手动改 `data/.env` 的 `MCP_API_KEYS` 也有效，最长 ≈3s（TTL）后被鉴权读到，无需重建容器。
+> - 两种方式读写同一 `MCP_API_KEYS`，互通。
 
 ## 开放工具（30 个）
 

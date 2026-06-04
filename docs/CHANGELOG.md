@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] WebUI 新增「密钥」页：查看/重置 MCP 中转站 API Key，重置后旧 key 立即失效、新 key 即时生效（无需重建容器），并提供一键复制连接配置
+- [改进] MCP 鉴权改为动态读取 data/.env 的 MCP_API_KEYS（带短 TTL 缓存），支持运行时改 key 免重启
 - [新功能] 新增 MCP 工具中转站（/mcp，Streamable HTTP），对外开放 30 个数据/新闻/分析工具供其他智能体零胶水调用，API Key 鉴权
 - [新功能] DataFetcherManager 新增 7 个只读 granular 路由方法（财务三表/质押/回购/增减持/解禁），沿用既有数据源优先级链
 - [文档] 新增 docs/mcp-gateway.md 与 MCP 配置项说明
