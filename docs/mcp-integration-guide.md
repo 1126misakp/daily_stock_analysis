@@ -69,10 +69,12 @@ curl -s -X POST https://a-stock.tech-monthly.online/mcp \
    - 美股：股票符号，如 `AAPL`、`TSLA`。
 2. **多数细分工具仅支持 A 股**（财务三表、质押、龙虎榜、筹码、盘中、资金流等）。给非 A 股代码会**优雅返回**（`{"info": ...}` 而非报错），不会崩。下表「市场」列标注 `A股` 的即为 A 股专属。
 3. **搜索类工具需同时给 `stock_code` 和 `stock_name`**（两者都必填），否则检索不准。
-4. **返回约定**（所有工具的 `tools/call` 结果是一段 JSON 文本）：
-   - 有数据：`{"stock_code": "...", "items": [...]}` 或工具特定结构（见下）。
-   - 无数据：`{"info": "..."}`（正常空结果，**不是错误**）。
-   - 取数失败：`{"error": "..."}`。
+4. **返回约定**（`tools/call` 结果是一段 JSON 文本，**形状因工具而异、没有统一信封**）：
+   - **列表类数据**：多数在 `items`（财务三表、质押、回购、解禁、增减持、人气榜、涨停池…）；少数用 `data`（`get_daily_history`、`get_dragon_tiger`）、`results`（`search_stock_news`）、或榜单的 `top`/`bottom`（`get_sector_rankings` 用 `top_sectors`/`bottom_sectors`，`get_concept_rankings` 用 `top`/`bottom`）。
+   - **标量/明细类**：直接平铺字段，无列表包裹（如 `get_realtime_quote` 的 `price`/`change_pct`、`analyze_trend` 的评分与 `signal_reasons`、`get_chip_distribution` 的 `profit_ratio` 等）。
+   - **成文报告**：`search_comprehensive_intel` 返回 `{"report": "...(Markdown)"}`。
+   - **`status` + `errors` 字段**：A 股深度/基本面类工具（`get_capital_flow`、`get_dragon_tiger`、`get_risk_assessment`，以及 `get_stock_info` 的 `fundamental_context`）会带 `status`（`ok`/`partial`/`not_supported`/`failed`）和 `errors`（列表，正常为空 `[]`）；部分子源失败时**仍 fail-open 返回已取到的字段**。
+   - **无数据**：表现为空 `items`/`data`、`status:"not_supported"`（常带 `note`）或 `{"info": "..."}`——均属正常空结果，**不是错误**，不要当失败重试。
 5. **无需轮询/会话保持**：无状态，每次 `tools/call` 独立返回。
 6. **数据时效**：盘中工具（实时报价、五档、盘中量能、分钟 K）在交易时段最有意义；非交易时段返回最近可得数据。
 7. **省 token**：财务/历史类返回最多 60 行；需要更早数据时用日期参数（如 `get_repurchase` 的 `start_date`）。
@@ -207,9 +209,11 @@ curl -s -X POST https://a-stock.tech-monthly.online/mcp \
 
 | 现象 | 含义 | 处理 |
 |------|------|------|
-| HTTP **401** `{"error":"unauthorized"}` | key 缺失/错误 | 检查 `Authorization: Bearer` 头与 key 是否正确 |
-| 结果含 `{"info": ...}` | 正常空结果（如非交易日、非 A 股调 A 股专属工具、无该数据） | 视为「无数据」，不要当失败重试 |
-| 结果含 `{"error": ...}` | 取数失败（数据源临时不可用等） | 可少量重试或换工具；多数有降级兜底 |
+| HTTP **401** | key 缺失/错误，鉴权失败连不上工具 | 检查 `Authorization: Bearer` 头与 key 是否正确 |
+| `status` = `not_supported`（常带 `note`） | 该工具不支持此标的（非 A 股调 A 股专属工具、ETF/指数等） | 视为「不适用」，换工具或换标的，**不要**重试 |
+| 空 `items`/`data`，或含 `{"info": ...}` | 正常空结果（非交易日、暂无该数据） | 视为「无数据」，**不要**当失败重试 |
+| `status` = `partial` | 部分子源成功、部分失败（fail-open） | 直接用已返回字段；`errors` 列出失败子项 |
+| `status` = `failed` 且 `errors` 非空，或结果含 `error` 字段 | 取数失败（数据源临时不可用/超时等） | 可少量重试或换工具；多数有降级兜底 |
 | 工具名不存在 | `{"error":"Unknown tool: ..."}` | 先 `tools/list` 核对名称 |
 
 **注意**：本期**未做限流**，但大量高频调用会消耗后端 Tushare 积分 / TickFlow 配额，请合理批量、避免风暴式请求。
@@ -222,4 +226,4 @@ curl -s -X POST https://a-stock.tech-monthly.online/mcp \
 - 代码：A股 `600519` / 港股 `hk00700` / 美股 `AAPL`。
 - 财务·盘中·龙虎榜·筹码·资金流·股东事件 = **仅 A 股**。
 - 搜索类 = **code + name 都要给**。
-- 返回 `items`=有数据、`info`=空、`error`=失败。
+- 返回形状因工具而异：列表多在 `items`（或 `data`/`results`/`top`+`bottom`）；深度类带 `status`(ok/partial/not_supported/failed)+`errors`；空 `items`/`info`/`not_supported`=无数据≠失败。
