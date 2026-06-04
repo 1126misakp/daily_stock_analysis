@@ -53,12 +53,23 @@ class TestMcpInitializeE2E(unittest.TestCase):
                     r401 = await client.post("/mcp", json=init, headers=no_key_hdr)
                     return r, r_slash, r401
 
-        with patch.dict(os.environ, {"MCP_API_KEYS": "testkey"}):
-            Config.reset_instance()
-            try:
-                r, r_slash, r401 = asyncio.run(_drive())
-            finally:
+        import tempfile
+        from api.mcp.auth import get_key_provider
+        with tempfile.TemporaryDirectory() as d:
+            env_path = os.path.join(d, ".env")
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.write("MCP_API_KEYS=testkey\n")
+            # provider 读 data/.env 文件（经 ConfigManager 解析 ENV_FILE）。
+            # 保留 Config.reset_instance() 仅为隔离 _security_settings() 等仍读 Config 的链路，
+            # 鉴权已改读文件、不依赖 Config，勿删。
+            with patch.dict(os.environ, {"ENV_FILE": env_path}):
                 Config.reset_instance()
+                get_key_provider().invalidate()
+                try:
+                    r, r_slash, r401 = asyncio.run(_drive())
+                finally:
+                    Config.reset_instance()
+                    get_key_provider().invalidate()
 
         self.assertEqual(r.status_code, 200, f"/mcp chain broke: {r.status_code} {r.text[:300]}")
         self.assertTrue("jsonrpc" in r.text or "result" in r.text, r.text[:300])

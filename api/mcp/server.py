@@ -141,12 +141,12 @@ def reset_mcp_session_manager() -> None:
 
 def build_mcp_asgi_app():
     """返回带 API Key 鉴权的 ASGI 子应用，供 app.mount('/mcp', ...)。"""
-    from api.mcp.auth import MCPAuthMiddleware, load_mcp_api_keys
+    from api.mcp.auth import MCPAuthMiddleware, get_key_provider
 
     async def handle_streamable_http(scope, receive, send):
         await get_mcp_session_manager().handle_request(scope, receive, send)
 
-    return MCPAuthMiddleware(handle_streamable_http, load_mcp_api_keys())
+    return MCPAuthMiddleware(handle_streamable_http, get_key_provider())
 
 
 class MCPPathNormalizerMiddleware:
